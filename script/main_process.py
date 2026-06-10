@@ -1,195 +1,241 @@
 import os
 import pandas as pd
 import numpy as np
-from openpyxl.utils import get_column_letter  # [ส่วนที่เพิ่มมา] นำเข้าคำสั่งสำหรับแปลงตัวเลขเป็นตัวอักษรคอลัมน์ เช่น 1 -> A
+from openpyxl.utils import get_column_letter
+from openpyxl.styles import Font  # นำเข้าฟังก์ชันสำหรับจัดฟอร์แมตตัวหนาและสีหัวตาราง
 
-# 1. กำหนดตำแหน่งโฟลเดอร์ตามโครงสร้างเครื่อง Mac
+# ==========================================
+# ⚠️ กำหนดตำแหน่ง Path โฟลเดอร์
+# (ตัวอย่างด้านล่างเป็น Path สำหรับ Mac)
+# ==========================================
 INPUT_DIR = "/Users/phachon/Documents/DKSH/auto-stock-report/input"
 OUTPUT_DIR = "/Users/phachon/Documents/DKSH/auto-stock-report/output"
 
-print("--- เริ่มต้นขั้นตอนที่ 1: โหลดไฟล์อัจฉริยะและสร้างคีย์อ้างอิง ---")
+try:
+    print("--- เริ่มต้นขั้นตอนที่ 1: โหลดไฟล์อัจฉริยะและสร้างคีย์อ้างอิง ---")
 
-def smart_load_file(folder, base_name):
-    """ ฟังก์ชันดึงข้อมูลอัจฉริยะ รองรับทั้ง CSV และ Excel โดยไม่สนใจนามสกุลที่ซ้อนกัน """
-    for file_name in os.listdir(folder):
-        if file_name.startswith(base_name) and not file_name.startswith("~$"):
-            full_path = os.path.join(folder, file_name)
-            if file_name.lower().endswith('.csv'):
-                print(f"-> กำลังอ่านไฟล์ CSV: {file_name}")
-                return pd.read_csv(full_path)
-            elif file_name.lower().endswith(('.xlsx', '.xls')):
-                print(f"-> กำลังอ่านไฟล์ Excel: {file_name}")
-                return pd.read_excel(full_path)
-    raise FileNotFoundError(f"ไม่พบไฟล์ที่ขึ้นต้นด้วย '{base_name}' ในโฟลเดอร์ {folder}")
+    def smart_load_file(folder, base_name):
+        for file_name in os.listdir(folder):
+            if file_name.startswith(base_name) and not file_name.startswith("~$"):
+                full_path = os.path.join(folder, file_name)
+                if file_name.lower().endswith('.csv'):
+                    print(f"-> กำลังอ่านไฟล์ CSV: {file_name}")
+                    return pd.read_csv(full_path)
+                elif file_name.lower().endswith(('.xlsx', '.xls')):
+                    print(f"-> กำลังอ่านไฟล์ Excel: {file_name}")
+                    return pd.read_excel(full_path)
+        raise FileNotFoundError(f"ไม่พบไฟล์ที่ขึ้นต้นด้วย '{base_name}' ในโฟลเดอร์ {folder}")
 
-# เรียกใช้งาน Smart Loader ดึงข้อมูลเข้าสู่ระบบ
-mb52_th40 = smart_load_file(INPUT_DIR, "MB52_TH40")
-mb52_th44 = smart_load_file(INPUT_DIR, "MB52_TH44")
-r138_th40 = smart_load_file(INPUT_DIR, "R138_TH40")
-r138_th44 = smart_load_file(INPUT_DIR, "R138_TH44")
-product_group = smart_load_file(INPUT_DIR, "Product Group")
+    mb52_th40 = smart_load_file(INPUT_DIR, "MB52_TH40")
+    mb52_th44 = smart_load_file(INPUT_DIR, "MB52_TH44")
+    r138_th40 = smart_load_file(INPUT_DIR, "R138_TH40")
+    r138_th44 = smart_load_file(INPUT_DIR, "R138_TH44")
+    product_group = smart_load_file(INPUT_DIR, "Product Group")
 
-# สร้างคีย์อ้างอิงเชื่อมโยงข้อมูล (Link Key) สำหรับเก็บไว้ใช้งานและส่งออกภายนอก
-mb52_th40['Link_Key'] = mb52_th40['Material'].astype(str) + mb52_th40['Unrestricted'].astype(str) + mb52_th40['Batch'].astype(str)
-mb52_th44['Link_Key'] = mb52_th44['Material'].astype(str) + mb52_th44['Unrestricted'].astype(str) + mb52_th44['Batch'].astype(str)
+    mb52_th40['Link_Key'] = mb52_th40['Material'].astype(str) + mb52_th40['Unrestricted'].astype(str) + mb52_th40['Batch'].astype(str)
+    mb52_th44['Link_Key'] = mb52_th44['Material'].astype(str) + mb52_th44['Unrestricted'].astype(str) + mb52_th44['Batch'].astype(str)
+    r138_th40['Link_Key'] = r138_th40['Material No.'].astype(str) + r138_th40['Quantity'].astype(str) + r138_th40['Batch no.'].astype(str)
+    r138_th44['Link_Key'] = r138_th44['Material No.'].astype(str) + r138_th44['Quantity'].astype(str) + r138_th44['Batch no.'].astype(str)
 
-r138_th40['Link_Key'] = r138_th40['Material No.'].astype(str) + r138_th40['Quantity'].astype(str) + r138_th40['Batch no.'].astype(str)
-r138_th44['Link_Key'] = r138_th44['Material No.'].astype(str) + r138_th44['Quantity'].astype(str) + r138_th44['Batch no.'].astype(str)
+    print("\n--- เริ่มต้นขั้นตอนที่ 2: รวมตารางและทำ Conditional Lookup ---")
+    df_data = pd.concat([mb52_th40, mb52_th44], ignore_index=True)
 
-print("โหลดข้อมูลและสร้างคีย์เสร็จสิ้น")
+    if 'Material Description' in df_data.columns:
+        df_data = df_data.drop(columns=['Material Description'])
+
+    df_pg_lookup = product_group[['Material', 'Product Group']].drop_duplicates()
+    df_data = pd.merge(df_data, df_pg_lookup, on='Material', how='left')
+
+    r130_th40_lookup = r138_th40[['Link_Key', 'Level 4 Product Group', 'Profit center', 'Last GR']].rename(
+        columns={'Level 4 Product Group': 'Shipper', 'Last GR': 'GR Date'}
+    ).drop_duplicates(subset=['Link_Key'])
+
+    r130_th44_lookup = r138_th44[['Link_Key', 'Level 4 Product Group', 'Profit center', 'Last GR']].rename(
+        columns={'Level 4 Product Group': 'Shipper', 'Last GR': 'GR Date'}
+    ).drop_duplicates(subset=['Link_Key'])
+
+    df_th40 = df_data[df_data['Plant'] != 'TH44'].copy()
+    df_th44 = df_data[df_data['Plant'] == 'TH44'].copy()
+
+    df_th40 = pd.merge(df_th40, r130_th40_lookup, on='Link_Key', how='left')
+    df_th44 = pd.merge(df_th44, r130_th44_lookup, on='Link_Key', how='left')
+
+    df_data = pd.concat([df_th40, df_th44], ignore_index=True)
+
+    columns_order = [
+        'Plant', 'Storage location', 'Material', 'Unrestricted', 'Value Unrestricted',
+        'Material type', 'Material Group', 'Product Group', 'Shipper', 'Profit center',
+        'GR Date', 'Batch'
+    ]
+    df_data = df_data[columns_order]
+
+    print("\n--- เริ่มต้นขั้นตอนที่ 3: การคำนวณอายุสินทรัพย์ ---")
+    df_data['GR Date'] = pd.to_datetime(df_data['GR Date'], errors='coerce')
+    current_date = pd.Timestamp.today().normalize()
+    df_data['Ageing'] = (current_date + pd.Timedelta(days=1) - df_data['GR Date']).dt.days
+    df_data['GR Date'] = df_data['GR Date'].dt.strftime('%Y-%m-%d')
+
+    bins = [-np.inf, 30, 90, 180, 365, np.inf]
+    labels = ["0-30", "31-90", "91-180", "181-365", ">365"]
+    df_data['Bucket'] = pd.cut(df_data['Ageing'], bins=bins, labels=labels)
+
+    final_columns_order = [
+        'Plant', 'Storage location', 'Material', 'Unrestricted', 'Value Unrestricted',
+        'Material type', 'Material Group', 'Product Group', 'Shipper', 'Profit center',
+        'GR Date', 'Ageing', 'Bucket', 'Batch'
+    ]
+    df_data = df_data[final_columns_order]
+
+    print("\n--- เริ่มต้นขั้นตอนที่ 4: การสรุปข้อมูลแนวกว้าง (Ageing > 365 D) ---")
+    grand_total_value = df_data['Value Unrestricted'].sum()
+
+    pivot_df = pd.pivot_table(
+        df_data, index='Shipper', columns='Bucket',
+        values=['Unrestricted', 'Value Unrestricted'], aggfunc='sum', fill_value=0
+    )
+
+    summary_data = []
+    buckets_list = [">365", "181-365", "91-180", "31-90", "0-30"]
+    clients = df_data['Shipper'].dropna().unique()
+
+    for client in clients:
+        row_data = {'Client': client}
+        total_qty = total_val = 0
+        for b in buckets_list:
+            try:
+                qty = pivot_df.loc[client, ('Unrestricted', b)]
+                val = pivot_df.loc[client, ('Value Unrestricted', b)]
+            except KeyError:
+                qty = val = 0
+                
+            pct = round((val / grand_total_value) * 100, 2) if grand_total_value > 0 else 0
+            row_data[f'Quantity {b}'] = qty
+            row_data[f'Stock Value THB. {b}'] = val
+            row_data[f'% {b}'] = pct
+            total_qty += qty
+            total_val += val
+            
+        row_data['Total Quantity'] = total_qty
+        row_data['Total Stock Value THB.'] = total_val
+        summary_data.append(row_data)
+    df_summary = pd.DataFrame(summary_data)
 
 
-print("\n--- เริ่มต้นขั้นตอนที่ 2: รวมตารางและทำ Conditional Lookup (XLOOKUP) ---")
-
-# รวมตาราง MB52
-df_data = pd.concat([mb52_th40, mb52_th44], ignore_index=True)
-
-# ลบคอลัมน์คำอธิบายเดิมออกเพื่อเตรียมแทรกแบบเป็นระบบ
-if 'Material Description' in df_data.columns:
-    df_data = df_data.drop(columns=['Material Description'])
-
-# ดึงข้อมูลกลุ่มผลิตภัณฑ์ (Product Group)
-df_pg_lookup = product_group[['Material', 'Product Group']].drop_duplicates()
-df_data = pd.merge(df_data, df_pg_lookup, on='Material', how='left')
-
-# เตรียม Data Mapping จาก R138 ทั้งสองโรงงาน
-r130_th40_lookup = r138_th40[['Link_Key', 'Level 4 Product Group', 'Profit center', 'Last GR']].rename(
-    columns={'Level 4 Product Group': 'Shipper', 'Last GR': 'GR Date'}
-).drop_duplicates(subset=['Link_Key'])
-
-r130_th44_lookup = r138_th44[['Link_Key', 'Level 4 Product Group', 'Profit center', 'Last GR']].rename(
-    columns={'Level 4 Product Group': 'Shipper', 'Last GR': 'GR Date'}
-).drop_duplicates(subset=['Link_Key'])
-
-# คัดแยกสายข้อมูลเพื่อดึงค่าตามเงื่อนไขของคลังสินค้า (Plant)
-df_th40 = df_data[df_data['Plant'] != 'TH44'].copy()
-df_th44 = df_data[df_data['Plant'] == 'TH44'].copy()
-
-df_th40 = pd.merge(df_th40, r130_th40_lookup, on='Link_Key', how='left')
-df_th44 = pd.merge(df_th44, r130_th44_lookup, on='Link_Key', how='left')
-
-# มัดรวมกลับมาเป็นตารางหลักตารางเดียว
-df_data = pd.concat([df_th40, df_th44], ignore_index=True)
-
-# จัดโครงสร้างลำดับคอลัมน์ของชีท DATA
-columns_order = [
-    'Plant', 'Storage location', 'Material', 'Unrestricted', 'Value Unrestricted', 
-    'Material type', 'Material Group', 'Product Group', 'Shipper', 'Profit center', 
-    'GR Date', 'Batch'
-]
-df_data = df_data[columns_order]
-print("เชื่อมโยงความสัมพันธ์ข้อมูลเสร็จสิ้น")
-
-
-print("\n--- เริ่มต้นขั้นตอนที่ 3: การคำนวณอายุสินทรัพย์ (Ageing) และการจัดกลุ่ม (Bucketing) ---")
-
-# เปลี่ยนคอลัมน์ GR Date เป็นชนิดข้อมูลวันที่เพื่อใช้คำนวณคณิตศาสตร์
-df_data['GR Date'] = pd.to_datetime(df_data['GR Date'], errors='coerce')
-
-# อ้างอิงเวลาปัจจุบันของระบบ
-current_date = pd.Timestamp.today().normalize()
-
-# สูตรคำนวณอายุสินค้าคงคลัง: TODAY + 1 - GR Date
-df_data['Ageing'] = (current_date + pd.Timedelta(days=1) - df_data['GR Date']).dt.days
-
-# ทำการแปลงข้อมูลรูปแบบวันที่ให้เหลือเฉพาะ 'YYYY-MM-DD' ตัดส่วนของเวลา 00:00 ออกไปจากระบบผลลัพธ์
-df_data['GR Date'] = df_data['GR Date'].dt.strftime('%Y-%m-%d')
-
-# จำแนกกลุ่มตามช่วงอายุขอบเขต (0-30 ไปจนถึง >365)
-bins = [-np.inf, 30, 90, 180, 365, np.inf]
-labels = ["0-30", "31-90", "91-180", "181-365", ">365"]
-df_data['Bucket'] = pd.cut(df_data['Ageing'], bins=bins, labels=labels)
-
-# บันทึกลำดับคอลัมน์เวอร์ชันสมบูรณ์ของชีท DATA
-final_columns_order = [
-    'Plant', 'Storage location', 'Material', 'Unrestricted', 'Value Unrestricted', 
-    'Material type', 'Material Group', 'Product Group', 'Shipper', 'Profit center', 
-    'GR Date', 'Ageing', 'Bucket', 'Batch'
-]
-df_data = df_data[final_columns_order]
-print("คำนวณและจำแนก Bucket สำเร็จ")
-
-
-print("\n--- เริ่มต้นขั้นตอนที่ 4: การสรุปข้อมูลทุก Bucket และสร้างไฟล์ Excel ผลลัพธ์ ---")
-
-# คำนวณมูลค่ารวมทั้งระบบเพื่อใช้คิดสัดส่วนร้อยละ (%)
-grand_total_value = df_data['Value Unrestricted'].sum()
-
-# หมุนมิติข้อมูลด้วย Pivot Table
-pivot_df = pd.pivot_table(
-    df_data,
-    index='Shipper',
-    columns='Bucket',
-    values=['Unrestricted', 'Value Unrestricted'],
-    aggfunc='sum',
-    fill_value=0
-)
-
-summary_data = []
-buckets_list = [">365", "181-365", "91-180", "31-90", "0-30"]
-clients = df_data['Shipper'].dropna().unique()
-
-for client in clients:
-    row_data = {'Client': client}
-    total_qty = 0
-    total_val = 0
+    print("\n--- เริ่มต้นขั้นตอนที่ 5: การสร้าง Dashboard สรุปผล 5 ตาราง (PV DATA) ---")
     
-    for b in buckets_list:
-        try:
-            qty = pivot_df.loc[client, ('Unrestricted', b)]
-            val = pivot_df.loc[client, ('Value Unrestricted', b)]
-        except KeyError:
-            qty = 0
-            val = 0
-            
-        pct = (val / grand_total_value) * 100 if grand_total_value > 0 else 0
+    # 1 & 2. ฟังก์ชันสร้างตาราง Inventory Clients (สีเหลืองและสีส้ม)
+    def make_client_table(df):
+        if df.empty:
+            return pd.DataFrame({'Client': ['Grand Total'], 'Quantity': [0], 'Stock Value THB.': [0], '%': [0]})
+        grouped = df.groupby('Shipper')[['Unrestricted', 'Value Unrestricted']].sum().reset_index()
+        grouped.rename(columns={'Shipper': 'Client', 'Unrestricted': 'Quantity', 'Value Unrestricted': 'Stock Value THB.'}, inplace=True)
+        grouped['%'] = (grouped['Stock Value THB.'] / grand_total_value * 100).round(2) if grand_total_value else 0
+        grouped = grouped.sort_values(by='Stock Value THB.', ascending=False)
         
-        row_data[f'Quantity {b}'] = qty
-        row_data[f'Stock Value THB. {b}'] = val
-        row_data[f'% {b}'] = pct
-        
-        total_qty += qty
-        total_val += val
-        
-    row_data['Total Quantity'] = total_qty
-    row_data['Total Stock Value THB.'] = total_val
-    summary_data.append(row_data)
+        gt_row = pd.DataFrame({
+            'Client': ['Grand Total'], 'Quantity': [grouped['Quantity'].sum()],
+            'Stock Value THB.': [grouped['Stock Value THB.'].sum()], '%': [grouped['%'].sum().round(2)]
+        })
+        return pd.concat([grouped, gt_row], ignore_index=True)
 
-df_summary = pd.DataFrame(summary_data)
+    df_inv_all = make_client_table(df_data)
+    df_inv_365 = make_client_table(df_data[df_data['Bucket'] == '>365'])
 
-# บันทึกข้อมูลลงสู่ระบบดิสก์ของเครื่อง
-os.makedirs(OUTPUT_DIR, exist_ok=True)
-output_path = os.path.join(OUTPUT_DIR, "Result_Report.xlsx")
-
-# ทำการบันทึก DataFrame ทั้งหมดลงในไฟล์เดี่ยวแยกแท็บแผ่นงานย่อยให้ครบถ้วน
-with pd.ExcelWriter(output_path, engine='openpyxl') as writer:
-    df_data.to_excel(writer, sheet_name='DATA', index=False)
-    df_summary.to_excel(writer, sheet_name='Ageing > 365 D', index=False)
-    
-    # บันทึกไฟล์ต้นทาง 5 ชุด
-    mb52_th40.to_excel(writer, sheet_name='MB52_TH40', index=False)
-    mb52_th44.to_excel(writer, sheet_name='MB52_TH44', index=False)
-    r138_th40.to_excel(writer, sheet_name='R138_TH40', index=False)
-    r138_th44.to_excel(writer, sheet_name='R138_TH44', index=False)
-    product_group.to_excel(writer, sheet_name='Product Group', index=False)
-
-    # --- [ส่วนที่เพิ่มเข้ามาใหม่]: ปรับความกว้างคอลัมน์อัตโนมัติ (Auto-fit) ---
-    print("กำลังจัดรูปแบบหน้าตา Excel และปรับขนาดความกว้างคอลัมน์อัตโนมัติ...")
-    for sheet_name in writer.sheets:
-        ws = writer.sheets[sheet_name]
-        for col in ws.columns:
-            max_len = 0
-            # ดึงตัวอักษรของคอลัมน์ (เช่น A, B, C)
-            col_letter = get_column_letter(col[0].column)
+    # 3 & 4. ฟังก์ชันสร้างตาราง Product Group (สีเขียว) และ Ageing (สีแดง)
+    def make_group_report(df, group_col):
+        rows = []
+        for p in ['TH40', 'TH44']:
+            p_data = df[df['Plant'] == p]
+            if p_data.empty: continue
             
-            # วนลูปหาข้อมูลที่มีความยาวมากที่สุดในแต่ละคอลัมน์ (รวมชื่อหัวตารางด้วย)
-            for cell in col:
-                if cell.value is not None:
-                    max_len = max(max_len, len(str(cell.value)))
+            p_qty, p_val = p_data['Unrestricted'].sum(), p_data['Value Unrestricted'].sum()
+            p_pct = round((p_val / grand_total_value) * 100, 2) if grand_total_value else 0
+            rows.append({'Category': p, 'Quantity': p_qty, 'Stock Value THB.': p_val, '%': p_pct})
             
-            # กำหนดขนาดความกว้าง = ความยาวที่มากที่สุด + 4 (บวกเผื่อพื้นที่ว่างให้อ่านง่าย)
-            # ตั้งค่าความกว้างต่ำสุดไว้ที่ 12 เพื่อป้องกันไม่ให้ช่องที่มีข้อมูลสั้นแคบจนเกินไป
-            ws.column_dimensions[col_letter].width = max(max_len + 4, 12)
+            sub_groups = ["0-30", "31-90", "91-180", "181-365", ">365"] if group_col == 'Bucket' else sorted(p_data[group_col].dropna().unique())
+            for sg in sub_groups:
+                sg_data = p_data[p_data[group_col] == sg]
+                if sg_data.empty: continue
+                sg_qty, sg_val = sg_data['Unrestricted'].sum(), sg_data['Value Unrestricted'].sum()
+                sg_pct = round((sg_val / grand_total_value) * 100, 2) if grand_total_value else 0
+                rows.append({'Category': f"   {sg}", 'Quantity': sg_qty, 'Stock Value THB.': sg_val, '%': sg_pct})
+                
+        rows.append({
+            'Category': 'Grand Total', 'Quantity': df['Unrestricted'].sum(),
+            'Stock Value THB.': df['Value Unrestricted'].sum(), 
+            '%': round((df['Value Unrestricted'].sum() / grand_total_value) * 100, 2) if grand_total_value else 0
+        })
+        return pd.DataFrame(rows)
 
-print(f"\n[สำเร็จ] ประมวลผลและจัดรูปแบบหน้าตาเสร็จสิ้นแบบ 100%!")
-print(f"-> ไฟล์รายงานพร้อมใช้งานถูกสร้างขึ้นแล้วที่: {output_path}")
+    df_pg_report = make_group_report(df_data, 'Product Group').rename(columns={'Category': 'Plant / Product Group'})
+    df_ageing_report = make_group_report(df_data, 'Bucket').rename(columns={'Category': 'Plant / Ageing'})
+
+    # 5. ฟังก์ชันสร้างตาราง Plant Report (สีฟ้า)
+    def make_plant_table(df):
+        grouped = df.groupby('Plant')[['Unrestricted', 'Value Unrestricted']].sum().reset_index()
+        grouped.rename(columns={'Unrestricted': 'Quantity', 'Value Unrestricted': 'Stock Value THB.'}, inplace=True)
+        grouped['%'] = (grouped['Stock Value THB.'] / grand_total_value * 100).round(2) if grand_total_value else 0
+        gt_row = pd.DataFrame({'Plant': ['Grand Total'], 'Quantity': [grouped['Quantity'].sum()],
+                               'Stock Value THB.': [grouped['Stock Value THB.'].sum()], '%': [grouped['%'].sum().round(2)]})
+        return pd.concat([grouped, gt_row], ignore_index=True)
+
+    df_plant_report = make_plant_table(df_data)
+
+    # ออกแบบ Grid Layout (กำหนดจุดเริ่มต้นแถวและคอลัมน์ของตารางใน Excel)
+    # คอลัมน์ที่ 1 (ซ้าย), 6 (กลาง), 11 (ขวา) เว้นช่องว่างให้อ่านง่าย
+    dash_layouts = [
+        (df_plant_report, "Plant Report", 1, 1),
+        (df_pg_report, "Product Group Report", 1 + len(df_plant_report) + 3, 1),
+        (df_ageing_report, "Ageing Report", 1 + len(df_plant_report) + 3 + len(df_pg_report) + 3, 1),
+        (df_inv_all, "Inventory Clients (THB)", 1, 6),
+        (df_inv_365, "Inventory Clients (THB) (>365)", 1, 11)
+    ]
+
+
+    print("\n--- กำลังบันทึกและจัดรูปแบบเอกสารขั้นสุดท้าย ---")
+    os.makedirs(OUTPUT_DIR, exist_ok=True)
+    output_path = os.path.join(OUTPUT_DIR, "Result_Report.xlsx")
+
+    with pd.ExcelWriter(output_path, engine='openpyxl') as writer:
+        # บันทึก Sheet หลัก
+        df_data.to_excel(writer, sheet_name='DATA', index=False)
+        df_summary.to_excel(writer, sheet_name='Ageing > 365 D', index=False)
+        
+        # บันทึก Sheet Dashboard ใหม่
+        dash_sheet_name = 'PV DATA (Dashboard)'
+        for t_df, title, r, c in dash_layouts:
+            t_df.to_excel(writer, sheet_name=dash_sheet_name, startrow=r, startcol=c, index=False)
+            ws = writer.sheets[dash_sheet_name]
+            # ใส่ชื่อตารางกำกับไว้ด้านบน และกำหนดตัวหนาสีน้ำเงิน
+            cell = ws.cell(row=r, column=c+1, value=title)
+            cell.font = Font(bold=True, color="000080", size=12)
+            
+        # บันทึก Sheet ไฟล์ต้นทาง
+        mb52_th40.to_excel(writer, sheet_name='MB52_TH40', index=False)
+        mb52_th44.to_excel(writer, sheet_name='MB52_TH44', index=False)
+        r138_th40.to_excel(writer, sheet_name='R138_TH40', index=False)
+        r138_th44.to_excel(writer, sheet_name='R138_TH44', index=False)
+        product_group.to_excel(writer, sheet_name='Product Group', index=False)
+
+        # จัดขนาดความกว้างคอลัมน์อัตโนมัติให้พอดีกับข้อมูล (ใช้กับทุก Sheet รวมถึงหน้า Dashboard)
+        for sheet_name in writer.sheets:
+            ws = writer.sheets[sheet_name]
+            for col in ws.columns:
+                max_len = 0
+                col_letter = get_column_letter(col[0].column)
+                for cell in col:
+                    if cell.value is not None:
+                        max_len = max(max_len, len(str(cell.value)))
+                ws.column_dimensions[col_letter].width = max(max_len + 4, 12)
+
+    print(f"\n[สำเร็จ] ประมวลผลและสร้าง Dashboard เสร็จสิ้นแบบ 100%!")
+    print(f"-> ไฟล์รายงานพร้อมใช้งานถูกสร้างขึ้นแล้วที่: {output_path}")
+
+except Exception as e:
+    print("\n" + "="*60)
+    print("❌ ระบบพบข้อผิดพลาด (ERROR) ไม่สามารถประมวลผลต่อได้ ❌")
+    print("รายละเอียด:")
+    print(e)
+    print("="*60 + "\n")
+finally:
+    input("\nกด Enter เพื่อปิดหน้าต่างนี้...")
