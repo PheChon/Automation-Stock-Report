@@ -2,11 +2,10 @@ import os
 import pandas as pd
 import numpy as np
 from openpyxl.utils import get_column_letter
-from openpyxl.styles import Font  # นำเข้าฟังก์ชันสำหรับจัดฟอร์แมตตัวหนาและสีหัวตาราง
+from openpyxl.styles import Font, PatternFill, Border, Side  # นำเข้าฟังก์ชันจัด Format
 
 # ==========================================
 # ⚠️ กำหนดตำแหน่ง Path โฟลเดอร์
-# (ตัวอย่างด้านล่างเป็น Path สำหรับ Mac)
 # ==========================================
 INPUT_DIR = "/Users/phachon/Documents/DKSH/auto-stock-report/input"
 OUTPUT_DIR = "/Users/phachon/Documents/DKSH/auto-stock-report/output"
@@ -31,6 +30,12 @@ try:
     r138_th40 = smart_load_file(INPUT_DIR, "R138_TH40")
     r138_th44 = smart_load_file(INPUT_DIR, "R138_TH44")
     product_group = smart_load_file(INPUT_DIR, "Product Group")
+
+    # [ปรับปรุง] ตัดเวลา 00:00:00 ออกจากตาราง R138 ต้นทาง
+    if 'Last GR' in r138_th40.columns:
+        r138_th40['Last GR'] = pd.to_datetime(r138_th40['Last GR'], errors='coerce').dt.strftime('%Y-%m-%d')
+    if 'Last GR' in r138_th44.columns:
+        r138_th44['Last GR'] = pd.to_datetime(r138_th44['Last GR'], errors='coerce').dt.strftime('%Y-%m-%d')
 
     mb52_th40['Link_Key'] = mb52_th40['Material'].astype(str) + mb52_th40['Unrestricted'].astype(str) + mb52_th40['Batch'].astype(str)
     mb52_th44['Link_Key'] = mb52_th44['Material'].astype(str) + mb52_th44['Unrestricted'].astype(str) + mb52_th44['Batch'].astype(str)
@@ -73,6 +78,8 @@ try:
     df_data['GR Date'] = pd.to_datetime(df_data['GR Date'], errors='coerce')
     current_date = pd.Timestamp.today().normalize()
     df_data['Ageing'] = (current_date + pd.Timedelta(days=1) - df_data['GR Date']).dt.days
+    
+    # [ปรับปรุง] ตัดเวลา 00:00:00 ออกจากตาราง DATA หลัก
     df_data['GR Date'] = df_data['GR Date'].dt.strftime('%Y-%m-%d')
 
     bins = [-np.inf, 30, 90, 180, 365, np.inf]
@@ -123,7 +130,6 @@ try:
 
     print("\n--- เริ่มต้นขั้นตอนที่ 5: การสร้าง Dashboard สรุปผล 5 ตาราง (PV DATA) ---")
     
-    # 1 & 2. ฟังก์ชันสร้างตาราง Inventory Clients (สีเหลืองและสีส้ม)
     def make_client_table(df):
         if df.empty:
             return pd.DataFrame({'Client': ['Grand Total'], 'Quantity': [0], 'Stock Value THB.': [0], '%': [0]})
@@ -141,7 +147,6 @@ try:
     df_inv_all = make_client_table(df_data)
     df_inv_365 = make_client_table(df_data[df_data['Bucket'] == '>365'])
 
-    # 3 & 4. ฟังก์ชันสร้างตาราง Product Group (สีเขียว) และ Ageing (สีแดง)
     def make_group_report(df, group_col):
         rows = []
         for p in ['TH40', 'TH44']:
@@ -170,7 +175,6 @@ try:
     df_pg_report = make_group_report(df_data, 'Product Group').rename(columns={'Category': 'Plant / Product Group'})
     df_ageing_report = make_group_report(df_data, 'Bucket').rename(columns={'Category': 'Plant / Ageing'})
 
-    # 5. ฟังก์ชันสร้างตาราง Plant Report (สีฟ้า)
     def make_plant_table(df):
         grouped = df.groupby('Plant')[['Unrestricted', 'Value Unrestricted']].sum().reset_index()
         grouped.rename(columns={'Unrestricted': 'Quantity', 'Value Unrestricted': 'Stock Value THB.'}, inplace=True)
@@ -181,8 +185,6 @@ try:
 
     df_plant_report = make_plant_table(df_data)
 
-    # ออกแบบ Grid Layout (กำหนดจุดเริ่มต้นแถวและคอลัมน์ของตารางใน Excel)
-    # คอลัมน์ที่ 1 (ซ้าย), 6 (กลาง), 11 (ขวา) เว้นช่องว่างให้อ่านง่าย
     dash_layouts = [
         (df_plant_report, "Plant Report", 1, 1),
         (df_pg_report, "Product Group Report", 1 + len(df_plant_report) + 3, 1),
@@ -196,30 +198,53 @@ try:
     os.makedirs(OUTPUT_DIR, exist_ok=True)
     output_path = os.path.join(OUTPUT_DIR, "Result_Report.xlsx")
 
+    # กำหนดสไตล์การตกแต่งตาราง (Styling)
+    header_fill = PatternFill(start_color="D9D9D9", end_color="D9D9D9", fill_type="solid") # สีเทาอ่อน
+    thin_border = Border(left=Side(style='thin'), right=Side(style='thin'), top=Side(style='thin'), bottom=Side(style='thin'))
+    header_font = Font(bold=True)
+
     with pd.ExcelWriter(output_path, engine='openpyxl') as writer:
-        # บันทึก Sheet หลัก
-        df_data.to_excel(writer, sheet_name='DATA', index=False)
-        df_summary.to_excel(writer, sheet_name='Ageing > 365 D', index=False)
         
-        # บันทึก Sheet Dashboard ใหม่
+        # 1. [ปรับปรุง] สร้างและจัดเรียง Sheet "PV DATA (Dashboard)" เป็นหน้าแรก
         dash_sheet_name = 'PV DATA (Dashboard)'
+        # สร้าง Dummy DataFrame เล็กๆ เพื่อสร้าง Sheet ขึ้นมาก่อน (ทริคของ Pandas)
+        pd.DataFrame().to_excel(writer, sheet_name=dash_sheet_name, index=False)
+        
         for t_df, title, r, c in dash_layouts:
             t_df.to_excel(writer, sheet_name=dash_sheet_name, startrow=r, startcol=c, index=False)
             ws = writer.sheets[dash_sheet_name]
-            # ใส่ชื่อตารางกำกับไว้ด้านบน และกำหนดตัวหนาสีน้ำเงิน
+            
+            # ตกแต่งชื่อหัวตารางหลัก (สีน้ำเงิน)
             cell = ws.cell(row=r, column=c+1, value=title)
             cell.font = Font(bold=True, color="000080", size=12)
             
-        # บันทึก Sheet ไฟล์ต้นทาง
+            # ตกแต่งแถว Header ของแต่ละตาราง (บรรทัดถัดจากชื่อตาราง)
+            for col_num in range(c + 1, c + 1 + len(t_df.columns)):
+                header_cell = ws.cell(row=r+1, column=col_num)
+                header_cell.fill = header_fill
+                header_cell.font = header_font
+                header_cell.border = thin_border
+                
+            # ตีเส้นขอบบางๆ (Border) ให้ข้อมูลทุกช่องในตาราง
+            for row_num in range(r + 2, r + 2 + len(t_df)):
+                for col_num in range(c + 1, c + 1 + len(t_df.columns)):
+                    ws.cell(row=row_num, column=col_num).border = thin_border
+
+        # 2. บันทึก Sheet อื่นๆ (DATA, Ageing, และไฟล์ต้นทาง)
+        df_data.to_excel(writer, sheet_name='DATA', index=False)
+        df_summary.to_excel(writer, sheet_name='Ageing > 365 D', index=False)
+        
         mb52_th40.to_excel(writer, sheet_name='MB52_TH40', index=False)
         mb52_th44.to_excel(writer, sheet_name='MB52_TH44', index=False)
         r138_th40.to_excel(writer, sheet_name='R138_TH40', index=False)
         r138_th44.to_excel(writer, sheet_name='R138_TH44', index=False)
         product_group.to_excel(writer, sheet_name='Product Group', index=False)
 
-        # จัดขนาดความกว้างคอลัมน์อัตโนมัติให้พอดีกับข้อมูล (ใช้กับทุก Sheet รวมถึงหน้า Dashboard)
+        # 3. จัดขนาดความกว้างคอลัมน์อัตโนมัติ และใส่ Format ขอบให้ Sheet อื่นๆ (ยกเว้น Dashboard ที่ทำไปแล้ว)
         for sheet_name in writer.sheets:
             ws = writer.sheets[sheet_name]
+            
+            # ลูปหาความกว้างคอลัมน์ที่เหมาะสม
             for col in ws.columns:
                 max_len = 0
                 col_letter = get_column_letter(col[0].column)
@@ -227,6 +252,19 @@ try:
                     if cell.value is not None:
                         max_len = max(max_len, len(str(cell.value)))
                 ws.column_dimensions[col_letter].width = max(max_len + 4, 12)
+                
+            # ใส่สีหัวตารางและตีเส้นให้ Sheet ทั่วไป (เช่น DATA, Ageing > 365 D)
+            if sheet_name != dash_sheet_name:
+                for col_num in range(1, ws.max_column + 1):
+                    header_cell = ws.cell(row=1, column=col_num)
+                    header_cell.fill = header_fill
+                    header_cell.font = header_font
+                    header_cell.border = thin_border
+                
+                # ตีเส้นขอบให้ข้อมูล
+                for row in ws.iter_rows(min_row=2, max_row=ws.max_row, min_col=1, max_col=ws.max_column):
+                    for cell in row:
+                        cell.border = thin_border
 
     print(f"\n[สำเร็จ] ประมวลผลและสร้าง Dashboard เสร็จสิ้นแบบ 100%!")
     print(f"-> ไฟล์รายงานพร้อมใช้งานถูกสร้างขึ้นแล้วที่: {output_path}")
