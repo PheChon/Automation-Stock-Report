@@ -104,7 +104,7 @@ try:
 
     bins = [-np.inf, 30, 90, 180, 365, np.inf]
     labels = ["0-30", "31-90", "91-180", "181-365", ">365"]
-    df_data['Bucket'] = pd.cut(df_data['Ageing'], bins=bins, labels=labels)  # [แก้ไขคำผิดแล้ว]
+    df_data['Bucket'] = pd.cut(df_data['Ageing'], bins=bins, labels=labels)
 
     final_columns_order = [
         'Plant', 'Storage location', 'Material', 'Unrestricted', 'Value Unrestricted',
@@ -141,7 +141,9 @@ try:
             
             row_data[f'Quantity {b}'] = qty
             row_data[f'Stock Value THB. {b}'] = val
-            row_data[f'% {b}'] = pct
+            # [ปรับปรุง] เติม % ลงท้ายในหน้าแนวกว้าง
+            row_data[f'% {b}'] = f"{pct}%"
+            
             total_qty += qty
             total_val += val
             
@@ -152,29 +154,30 @@ try:
 
     print("\n--- เริ่มต้นขั้นตอนที่ 5: การสร้าง Dashboard สรุปผล 5 ตาราง (PV DATA) ---")
     
-    # [ปรับปรุง] เพิ่มการรันลำดับ (Ranking) ให้กับตาราง Client
     def make_client_table(df, denominator):
         if df.empty:
-            return pd.DataFrame({'No.': [''], 'Client': ['Grand Total'], 'Quantity': [0], 'Stock Value THB.': [0], '%': [0]})
+            return pd.DataFrame({'No.': [''], 'Client': ['Grand Total'], 'Quantity': [0], 'Stock Value THB.': [0], '%': ['0%']})
         grouped = df.groupby('Shipper')[['Unrestricted', 'Value Unrestricted']].sum().reset_index()
         grouped.rename(columns={'Shipper': 'Client', 'Unrestricted': 'Quantity', 'Value Unrestricted': 'Stock Value THB.'}, inplace=True)
         grouped['%'] = (grouped['Stock Value THB.'] / denominator * 100).round(2) if denominator else 0
         grouped = grouped.sort_values(by='Stock Value THB.', ascending=False).reset_index(drop=True)
         
-        # แทรกคอลัมน์ลำดับที่ (1, 2, 3...) ไว้หน้าสุด
         grouped.insert(0, 'No.', range(1, len(grouped) + 1))
+        sum_pct = grouped['%'].sum().round(2)
+        
+        # [ปรับปรุง] แปลงเป็นตัวหนังสือแล้วเติม %
+        grouped['%'] = grouped['%'].astype(str) + '%'
         
         gt_row = pd.DataFrame({
             'No.': [''],
             'Client': ['Grand Total'], 
             'Quantity': [grouped['Quantity'].sum()],
             'Stock Value THB.': [grouped['Stock Value THB.'].sum()], 
-            '%': [grouped['%'].sum().round(2)]
+            '%': [f"{sum_pct}%"]
         })
         return pd.concat([grouped, gt_row], ignore_index=True)
 
     df_inv_all = make_client_table(df_data, grand_total_value)
-    
     total_365_val = bucket_totals.get('>365', 0)
     df_inv_365 = make_client_table(df_data[df_data['Bucket'] == '>365'], total_365_val)
 
@@ -186,7 +189,7 @@ try:
             
             p_qty, p_val = p_data['Unrestricted'].sum(), p_data['Value Unrestricted'].sum()
             p_pct = round((p_val / grand_total_value) * 100, 2) if grand_total_value else 0
-            rows.append({'Category': p, 'Quantity': p_qty, 'Stock Value THB.': p_val, '%': p_pct})
+            rows.append({'Category': p, 'Quantity': p_qty, 'Stock Value THB.': p_val, '%': f"{p_pct}%"})
             
             sub_groups = ["0-30", "31-90", "91-180", "181-365", ">365"] if group_col == 'Bucket' else sorted(p_data[group_col].dropna().unique())
             for sg in sub_groups:
@@ -200,12 +203,13 @@ try:
                     denominator = grand_total_value
                     
                 sg_pct = round((sg_val / denominator) * 100, 2) if denominator > 0 else 0
-                rows.append({'Category': f"   {sg}", 'Quantity': sg_qty, 'Stock Value THB.': sg_val, '%': sg_pct})
+                rows.append({'Category': f"   {sg}", 'Quantity': sg_qty, 'Stock Value THB.': sg_val, '%': f"{sg_pct}%"})
                 
+        gt_pct = round((df['Value Unrestricted'].sum() / grand_total_value) * 100, 2) if grand_total_value else 0
         rows.append({
             'Category': 'Grand Total', 'Quantity': df['Unrestricted'].sum(),
             'Stock Value THB.': df['Value Unrestricted'].sum(), 
-            '%': round((df['Value Unrestricted'].sum() / grand_total_value) * 100, 2) if grand_total_value else 0
+            '%': f"{gt_pct}%"
         })
         return pd.DataFrame(rows)
 
@@ -216,29 +220,30 @@ try:
         grouped = df.groupby('Plant')[['Unrestricted', 'Value Unrestricted']].sum().reset_index()
         grouped.rename(columns={'Unrestricted': 'Quantity', 'Value Unrestricted': 'Stock Value THB.'}, inplace=True)
         grouped['%'] = (grouped['Stock Value THB.'] / grand_total_value * 100).round(2) if grand_total_value else 0
+        sum_pct = grouped['%'].sum().round(2)
+        
+        grouped['%'] = grouped['%'].astype(str) + '%'
         gt_row = pd.DataFrame({'Plant': ['Grand Total'], 'Quantity': [grouped['Quantity'].sum()],
-                               'Stock Value THB.': [grouped['Stock Value THB.'].sum()], '%': [grouped['%'].sum().round(2)]})
+                               'Stock Value THB.': [grouped['Stock Value THB.'].sum()], '%': [f"{sum_pct}%"]})
         return pd.concat([grouped, gt_row], ignore_index=True)
 
     df_plant_report = make_plant_table(df_data)
 
-    # เลื่อนตารางให้คอลัมน์รับกับตัวแปร No. ที่เพิ่มเข้ามา
     dash_layouts = [
         (df_plant_report, "Plant Report", 5, 1),
         (df_pg_report, "Product Group Report", 5 + len(df_plant_report) + 3, 1),
         (df_ageing_report, "Ageing Report", 5 + len(df_plant_report) + 3 + len(df_pg_report) + 3, 1),
         (df_inv_all, "Inventory Clients (THB)", 5, 6),
-        (df_inv_365, "Inventory Clients (THB) (>365)", 5, 12) # ขยับคอลัมน์หนีเพื่อให้มีช่องว่างให้อ่านง่าย
+        (df_inv_365, "Inventory Clients (THB) (>365)", 5, 12)
     ]
 
     print("\n--- กำลังบันทึกและจัดรูปแบบเอกสารขั้นสุดท้าย ---")
     os.makedirs(OUTPUT_DIR, exist_ok=True)
     output_path = os.path.join(OUTPUT_DIR, "Result_Report.xlsx")
 
-    # กำหนดชุดสีสำหรับการไฮไลท์ (Color Palette)
     header_fill = PatternFill(start_color="D9D9D9", end_color="D9D9D9", fill_type="solid")
     total_fill = PatternFill(start_color="D9E1F2", end_color="D9E1F2", fill_type="solid") 
-    top10_fill = PatternFill(start_color="FFF2CC", end_color="FFF2CC", fill_type="solid") # [เพิ่มใหม่] สีเหลืองทองอ่อนสำหรับ Top 10
+    top10_fill = PatternFill(start_color="FFF2CC", end_color="FFF2CC", fill_type="solid") 
     
     thin_border = Border(left=Side(style='thin'), right=Side(style='thin'), top=Side(style='thin'), bottom=Side(style='thin'))
     header_font = Font(bold=True)
@@ -261,32 +266,26 @@ try:
         summary_cell = ws["B2"]
         summary_cell.value = summary_text
         summary_cell.font = Font(bold=True, color="002060", size=11)
-        summary_cell.fill = PatternFill(start_color="E2EFDA", end_color="E2EFDA", fill_type="solid") # เปลี่ยนพื้นหลังข้อความเป็นสีเขียวอ่อนสวยๆ
+        summary_cell.fill = PatternFill(start_color="E2EFDA", end_color="E2EFDA", fill_type="solid")
         summary_cell.alignment = Alignment(wrap_text=True, vertical="center", horizontal="left")
         
-        # กระบวนการวาดตารางและเทสี
         for t_df, title, r, c in dash_layouts:
             t_df.to_excel(writer, sheet_name=dash_sheet_name, startrow=r, startcol=c, index=False)
             
             cell = ws.cell(row=r, column=c+1, value=title)
             cell.font = Font(bold=True, color="000080", size=12)
             
-            # วาดหัวตาราง
             for col_num in range(c + 1, c + 1 + len(t_df.columns)):
                 header_cell = ws.cell(row=r+1, column=col_num)
                 header_cell.fill = header_fill
                 header_cell.font = header_font
                 header_cell.border = thin_border
                 
-            # วาดข้อมูลและจัดการ Conditional Formatting (สี)
             for row_num in range(r + 2, r + 2 + len(t_df)):
-                
-                # เช็คว่าเป็นบรรทัดผลรวม (Grand Total / TH40 / TH44) หรือไม่
                 val_col1 = str(ws.cell(row=row_num, column=c+1).value)
                 val_col2 = str(ws.cell(row=row_num, column=c+2).value)
                 is_total_row = (val_col1 in ["Grand Total", "TH40", "TH44"]) or (val_col2 in ["Grand Total"])
                 
-                # [เพิ่มใหม่] เช็คว่าเป็นตาราง Client และอยู่ใน Top 10 หรือไม่ (ไม่รวมบรรทัด Total)
                 is_client_table = "Clients" in title
                 is_top_10 = is_client_table and (row_num < r + 2 + 10) and not is_total_row
 
@@ -294,7 +293,6 @@ try:
                     data_cell = ws.cell(row=row_num, column=col_num)
                     data_cell.border = thin_border
                     
-                    # สั่งเทสีตามเงื่อนไข
                     if is_total_row:
                         data_cell.fill = total_fill
                         data_cell.font = total_font
@@ -317,8 +315,13 @@ try:
                 col_letter = get_column_letter(col[0].column)
                 for cell in col:
                     if cell.value is not None:
+                        # [ปรับปรุง] ข้ามการคำนวณความยาวของประโยค Executive Summary เพื่อไม่ให้คอลัมน์กว้างเกินไป
+                        if sheet_name == dash_sheet_name and cell.row < 5:
+                            continue
                         max_len = max(max_len, len(str(cell.value)))
-                target_ws.column_dimensions[col_letter].width = max(max_len + 4, 12)
+                
+                # [ปรับปรุง] บังคับความกว้างสูงสุด (Max Width) ให้พอดีตา
+                target_ws.column_dimensions[col_letter].width = min(max(max_len + 2, 10), 45)
                 
             if sheet_name != dash_sheet_name:
                 for col_num in range(1, target_ws.max_column + 1):
