@@ -55,7 +55,7 @@ try:
     print("\n--- เริ่มต้นขั้นตอนที่ 2: รวมตารางและทำ Conditional Lookup ---")
     df_data = pd.concat([mb52_th40, mb52_th44], ignore_index=True)
 
-    # [แก้ไข 1] กรองขยะและบรรทัด Grand Total จาก SAP ออกให้หมด เพื่อแก้ปัญหาตัวเลขเบิ้ล 2 เท่า
+    # กรองขยะและบรรทัด Grand Total จาก SAP ออก
     df_data = df_data.dropna(subset=['Material', 'Plant'])
     df_data = df_data[df_data['Plant'].isin(['TH40', 'TH44'])].copy()
 
@@ -86,7 +86,7 @@ try:
 
     df_data = pd.concat([df_th40, df_th44], ignore_index=True)
 
-    # [แก้ไข 2] เติมค่าว่างด้วย Unassigned ป้องกันข้อมูลหายตอน Groupby และทำให้ % รวมได้ 100 พอดี
+    # เติมค่าว่างด้วย Unassigned
     df_data['Shipper'] = df_data['Shipper'].fillna('Unassigned Shipper')
     df_data['Product Group'] = df_data['Product Group'].fillna('Unassigned Group')
 
@@ -116,8 +116,10 @@ try:
     df_data = df_data[final_columns_order]
 
     print("\n--- เริ่มต้นขั้นตอนที่ 4: การสรุปข้อมูลแนวกว้าง (Ageing > 365 D) ---")
-    # ค่านี้คือยอดรวมแท้จริง (จะไม่โดนเบิ้ลแล้ว)
     grand_total_value = df_data['Value Unrestricted'].sum()
+    
+    # [แก้ไข] คำนวณยอดรวมของแต่ละช่วงอายุ (Bucket Totals) เพื่อดึงไปใช้เป็นฐาน %
+    bucket_totals = df_data.groupby('Bucket', observed=False)['Value Unrestricted'].sum().to_dict()
 
     pivot_df = pd.pivot_table(
         df_data, index='Shipper', columns='Bucket',
@@ -137,8 +139,11 @@ try:
                 val = pivot_df.loc[client, ('Value Unrestricted', b)]
             except KeyError:
                 qty = val = 0
-                
-            pct = round((val / grand_total_value) * 100, 2) if grand_total_value > 0 else 0
+            
+            # [แก้ไข] ใช้ยอดรวมของ Bucket ตัวเองเป็นตัวหารในการหา %
+            b_total = bucket_totals.get(b, 0)
+            pct = round((val / b_total) * 100, 2) if b_total > 0 else 0
+            
             row_data[f'Quantity {b}'] = qty
             row_data[f'Stock Value THB. {b}'] = val
             row_data[f'% {b}'] = pct
@@ -152,12 +157,13 @@ try:
 
     print("\n--- เริ่มต้นขั้นตอนที่ 5: การสร้าง Dashboard สรุปผล 5 ตาราง (PV DATA) ---")
     
-    def make_client_table(df):
+    # [แก้ไข] เพิ่ม Parameter denominator เพื่อรับฐานตัวเลขที่จะเอามาหาร
+    def make_client_table(df, denominator):
         if df.empty:
             return pd.DataFrame({'Client': ['Grand Total'], 'Quantity': [0], 'Stock Value THB.': [0], '%': [0]})
         grouped = df.groupby('Shipper')[['Unrestricted', 'Value Unrestricted']].sum().reset_index()
         grouped.rename(columns={'Shipper': 'Client', 'Unrestricted': 'Quantity', 'Value Unrestricted': 'Stock Value THB.'}, inplace=True)
-        grouped['%'] = (grouped['Stock Value THB.'] / grand_total_value * 100).round(2) if grand_total_value else 0
+        grouped['%'] = (grouped['Stock Value THB.'] / denominator * 100).round(2) if denominator else 0
         grouped = grouped.sort_values(by='Stock Value THB.', ascending=False)
         
         gt_row = pd.DataFrame({
@@ -166,8 +172,12 @@ try:
         })
         return pd.concat([grouped, gt_row], ignore_index=True)
 
-    df_inv_all = make_client_table(df_data)
-    df_inv_365 = make_client_table(df_data[df_data['Bucket'] == '>365'])
+    # ตารางหลัก หารด้วยยอด Grand Total ปกติ
+    df_inv_all = make_client_table(df_data, grand_total_value)
+    
+    # ตาราง > 365 หารด้วย ยอดรวมของเฉพาะกลุ่ม > 365
+    total_365_val = bucket_totals.get('>365', 0)
+    df_inv_365 = make_client_table(df_data[df_data['Bucket'] == '>365'], total_365_val)
 
     def make_group_report(df, group_col):
         rows = []
@@ -185,8 +195,14 @@ try:
                 sg_data = p_data[p_data[group_col] == sg]
                 if sg_data.empty: continue
                 sg_qty, sg_val = sg_data['Unrestricted'].sum(), sg_data['Value Unrestricted'].sum()
-                sg_pct = round((sg_val / grand_total_value) * 100, 2) if grand_total_value else 0
-                # แถวบรรทัดซอยย่อย
+                
+                # [แก้ไข] แถวบรรทัดซอยย่อย ถ้าเป็นตาราง Ageing ให้หารด้วยยอดรวมของ Ageing นั้นๆ
+                if group_col == 'Bucket':
+                    denominator = bucket_totals.get(sg, 0)
+                else:
+                    denominator = grand_total_value
+                    
+                sg_pct = round((sg_val / denominator) * 100, 2) if denominator > 0 else 0
                 rows.append({'Category': f"   {sg}", 'Quantity': sg_qty, 'Stock Value THB.': sg_val, '%': sg_pct})
                 
         # แถวสรุปสุดท้าย
@@ -265,7 +281,7 @@ try:
                     if cell.value is not None:
                         max_len = max(max_len, len(str(cell.value)))
                 ws.column_dimensions[col_letter].width = max(max_len + 4, 12)
-                 
+                
             if sheet_name != dash_sheet_name:
                 for col_num in range(1, ws.max_column + 1):
                     header_cell = ws.cell(row=1, column=col_num)
