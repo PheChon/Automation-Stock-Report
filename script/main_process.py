@@ -242,7 +242,7 @@ try:
         (df_inv_365, "Inventory Clients (THB) (>365)", 5, 12)
     ]
 
-    print("\n--- กำลังบันทึกและจัดรูปแบบเอกสารขั้นสุดท้าย (ใส่ลูกน้ำตัวเลข) ---")
+    print("\n--- กำลังบันทึกและจัดรูปแบบเอกสารขั้นสุดท้าย (ปรับ Format ตัวเลข) ---")
     os.makedirs(OUTPUT_DIR, exist_ok=True)
     output_path = os.path.join(OUTPUT_DIR, "Result_Report.xlsx")
 
@@ -304,13 +304,13 @@ try:
                     elif is_top_10:
                         data_cell.fill = top10_fill
                         
-                    # [ปรับปรุง] สั่งเติมเครื่องหมาย Comma ผ่าน Excel Format 
+                    # [แก้ไขจุดทศนิยม] บังคับ Format Quantity ให้เป็นจำนวนเต็มเท่านั้น
                     header_val = str(ws.cell(row=r+1, column=col_num).value)
                     if isinstance(data_cell.value, (int, float)):
                         if "Stock Value" in header_val or "Value" in header_val:
                             data_cell.number_format = '#,##0.00'
                         elif "Quantity" in header_val or "Unrestricted" in header_val:
-                            data_cell.number_format = '#,##0.##'
+                            data_cell.number_format = '#,##0'  # ลบ .## ออกเพื่อซ่อนจุดทศนิยมทิ้ง
 
         df_data.to_excel(writer, sheet_name='DATA', index=False)
         df_summary.to_excel(writer, sheet_name='Ageing > 365 D', index=False)
@@ -324,7 +324,6 @@ try:
         for sheet_name in writer.sheets:
             target_ws = writer.sheets[sheet_name]
             
-            # [ปรับปรุง] ตีเส้นขอบและใส่ Comma ให้กับชีทอื่นๆ (เช่น DATA, Ageing > 365)
             if sheet_name != dash_sheet_name:
                 col_formats = {}
                 for col_num in range(1, target_ws.max_column + 1):
@@ -333,20 +332,19 @@ try:
                     h_cell.font = header_font
                     h_cell.border = thin_border
                     
+                    # [แก้ไขจุดทศนิยม] บังคับ Format Quantity ให้เป็นจำนวนเต็มเท่านั้น
                     h_val = str(h_cell.value)
                     if "Stock Value" in h_val or "Value" in h_val:
                         col_formats[col_num] = '#,##0.00'
                     elif "Quantity" in h_val or "Unrestricted" in h_val:
-                        col_formats[col_num] = '#,##0.##'
+                        col_formats[col_num] = '#,##0'  # ลบ .## ออกเพื่อซ่อนจุดทศนิยมทิ้ง
                 
                 for row in target_ws.iter_rows(min_row=2, max_row=target_ws.max_row, min_col=1, max_col=target_ws.max_column):
                     for cell in row:
                         cell.border = thin_border
-                        # ใส่ Format ตัวเลขที่มีลูกน้ำ
                         if cell.column in col_formats and isinstance(cell.value, (int, float)):
                             cell.number_format = col_formats[cell.column]
 
-            # จัดขนาดความกว้างอัตโนมัติให้พอดี
             for col in target_ws.columns:
                 max_len = 0
                 col_letter = get_column_letter(col[0].column)
