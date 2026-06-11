@@ -2,7 +2,8 @@ import os
 import pandas as pd
 import numpy as np
 from openpyxl.utils import get_column_letter
-from openpyxl.styles import Font, PatternFill, Border, Side
+from openpyxl.styles import Font, PatternFill, Border, Side, Alignment  # เพิ่ม Alignment สำหรับจัดข้อความสรุป
+from openpyxl.chart import PieChart, Reference  # [เพิ่มใหม่] นำเข้าโมดูลสำหรับวาดกราฟลง Excel
 
 # ==========================================
 # ⚠️ กำหนดตำแหน่ง Path โฟลเดอร์ของ Windows
@@ -55,7 +56,6 @@ try:
     print("\n--- เริ่มต้นขั้นตอนที่ 2: รวมตารางและทำ Conditional Lookup ---")
     df_data = pd.concat([mb52_th40, mb52_th44], ignore_index=True)
 
-    # กรองขยะและบรรทัด Grand Total จาก SAP ออก
     df_data = df_data.dropna(subset=['Material', 'Plant'])
     df_data = df_data[df_data['Plant'].isin(['TH40', 'TH44'])].copy()
 
@@ -86,7 +86,6 @@ try:
 
     df_data = pd.concat([df_th40, df_th44], ignore_index=True)
 
-    # เติมค่าว่างด้วย Unassigned
     df_data['Shipper'] = df_data['Shipper'].fillna('Unassigned Shipper')
     df_data['Product Group'] = df_data['Product Group'].fillna('Unassigned Group')
 
@@ -106,7 +105,7 @@ try:
 
     bins = [-np.inf, 30, 90, 180, 365, np.inf]
     labels = ["0-30", "31-90", "91-180", "181-365", ">365"]
-    df_data['Bucket'] = pd.cut(df_data['Ageing'], bins=bins, labels=labels)
+    df_data['Bucket'] = pd.cut(df_data['Ageing'], bins=bins=bins, labels=labels)
 
     final_columns_order = [
         'Plant', 'Storage location', 'Material', 'Unrestricted', 'Value Unrestricted',
@@ -117,8 +116,6 @@ try:
 
     print("\n--- เริ่มต้นขั้นตอนที่ 4: การสรุปข้อมูลแนวกว้าง (Ageing > 365 D) ---")
     grand_total_value = df_data['Value Unrestricted'].sum()
-    
-    # [แก้ไข] คำนวณยอดรวมของแต่ละช่วงอายุ (Bucket Totals) เพื่อดึงไปใช้เป็นฐาน %
     bucket_totals = df_data.groupby('Bucket', observed=False)['Value Unrestricted'].sum().to_dict()
 
     pivot_df = pd.pivot_table(
@@ -140,7 +137,6 @@ try:
             except KeyError:
                 qty = val = 0
             
-            # [แก้ไข] ใช้ยอดรวมของ Bucket ตัวเองเป็นตัวหารในการหา %
             b_total = bucket_totals.get(b, 0)
             pct = round((val / b_total) * 100, 2) if b_total > 0 else 0
             
@@ -157,7 +153,6 @@ try:
 
     print("\n--- เริ่มต้นขั้นตอนที่ 5: การสร้าง Dashboard สรุปผล 5 ตาราง (PV DATA) ---")
     
-    # [แก้ไข] เพิ่ม Parameter denominator เพื่อรับฐานตัวเลขที่จะเอามาหาร
     def make_client_table(df, denominator):
         if df.empty:
             return pd.DataFrame({'Client': ['Grand Total'], 'Quantity': [0], 'Stock Value THB.': [0], '%': [0]})
@@ -172,10 +167,8 @@ try:
         })
         return pd.concat([grouped, gt_row], ignore_index=True)
 
-    # ตารางหลัก หารด้วยยอด Grand Total ปกติ
     df_inv_all = make_client_table(df_data, grand_total_value)
     
-    # ตาราง > 365 หารด้วย ยอดรวมของเฉพาะกลุ่ม > 365
     total_365_val = bucket_totals.get('>365', 0)
     df_inv_365 = make_client_table(df_data[df_data['Bucket'] == '>365'], total_365_val)
 
@@ -187,7 +180,6 @@ try:
             
             p_qty, p_val = p_data['Unrestricted'].sum(), p_data['Value Unrestricted'].sum()
             p_pct = round((p_val / grand_total_value) * 100, 2) if grand_total_value else 0
-            # แถวบรรทัดยอดรวมของแต่ละ Plant
             rows.append({'Category': p, 'Quantity': p_qty, 'Stock Value THB.': p_val, '%': p_pct})
             
             sub_groups = ["0-30", "31-90", "91-180", "181-365", ">365"] if group_col == 'Bucket' else sorted(p_data[group_col].dropna().unique())
@@ -196,7 +188,6 @@ try:
                 if sg_data.empty: continue
                 sg_qty, sg_val = sg_data['Unrestricted'].sum(), sg_data['Value Unrestricted'].sum()
                 
-                # [แก้ไข] แถวบรรทัดซอยย่อย ถ้าเป็นตาราง Ageing ให้หารด้วยยอดรวมของ Ageing นั้นๆ
                 if group_col == 'Bucket':
                     denominator = bucket_totals.get(sg, 0)
                 else:
@@ -205,7 +196,6 @@ try:
                 sg_pct = round((sg_val / denominator) * 100, 2) if denominator > 0 else 0
                 rows.append({'Category': f"   {sg}", 'Quantity': sg_qty, 'Stock Value THB.': sg_val, '%': sg_pct})
                 
-        # แถวสรุปสุดท้าย
         rows.append({
             'Category': 'Grand Total', 'Quantity': df['Unrestricted'].sum(),
             'Stock Value THB.': df['Value Unrestricted'].sum(), 
@@ -226,12 +216,13 @@ try:
 
     df_plant_report = make_plant_table(df_data)
 
+    # [ปรับปรุง 1] ย้ายตำแหน่งการวาดตารางลงมาด้านล่าง 4 บรรทัด (startrow บวกเพิ่ม 4) เพื่อเปิดพื้นที่ให้ Executive Summary
     dash_layouts = [
-        (df_plant_report, "Plant Report", 1, 1),
-        (df_pg_report, "Product Group Report", 1 + len(df_plant_report) + 3, 1),
-        (df_ageing_report, "Ageing Report", 1 + len(df_plant_report) + 3 + len(df_pg_report) + 3, 1),
-        (df_inv_all, "Inventory Clients (THB)", 1, 6),
-        (df_inv_365, "Inventory Clients (THB) (>365)", 1, 11)
+        (df_plant_report, "Plant Report", 5, 1),
+        (df_pg_report, "Product Group Report", 5 + len(df_plant_report) + 3, 1),
+        (df_ageing_report, "Ageing Report", 5 + len(df_plant_report) + 3 + len(df_pg_report) + 3, 1),
+        (df_inv_all, "Inventory Clients (THB)", 5, 6),
+        (df_inv_365, "Inventory Clients (THB) (>365)", 5, 11)
     ]
 
     print("\n--- กำลังบันทึกและจัดรูปแบบเอกสารขั้นสุดท้าย ---")
@@ -239,16 +230,35 @@ try:
     output_path = os.path.join(OUTPUT_DIR, "Result_Report.xlsx")
 
     header_fill = PatternFill(start_color="D9D9D9", end_color="D9D9D9", fill_type="solid")
+    total_fill = PatternFill(start_color="D9E1F2", end_color="D9E1F2", fill_type="solid") # [เพิ่มใหม่] สีน้ำเงินอ่อนสำหรับแถวรวม
     thin_border = Border(left=Side(style='thin'), right=Side(style='thin'), top=Side(style='thin'), bottom=Side(style='thin'))
     header_font = Font(bold=True)
+    total_font = Font(bold=True, color="000000")
 
     with pd.ExcelWriter(output_path, engine='openpyxl') as writer:
         dash_sheet_name = 'PV DATA (Dashboard)'
         pd.DataFrame().to_excel(writer, sheet_name=dash_sheet_name, index=False)
+        ws = writer.sheets[dash_sheet_name]
         
+        # [เพิ่มใหม่ 2] เขียนข้อความสรุปวิเคราะห์ผู้บริหารระดับสูง (Automated Executive Summary)
+        pct_365 = round((total_365_val / grand_total_value * 100), 2) if grand_total_value else 0
+        top_client_365 = df_inv_365.iloc[0]['Client'] if len(df_inv_365) > 1 else "N/A"
+        
+        summary_text = (
+            f"Executive Summary: Total Inventory Value is {grand_total_value:,.2f} THB. "
+            f"Dead Stock (>365 Days) accounts for {total_365_val:,.2f} THB ({pct_365}% of total inventory). "
+            f"The primary client driver for dead stock is '{top_client_365}'."
+        )
+        ws.merge_cells("B2:N4")
+        summary_cell = ws["B2"]
+        summary_cell.value = summary_text
+        summary_cell.font = Font(bold=True, color="002060", size=11)
+        summary_cell.fill = PatternFill(start_color="FFF2CC", end_color="FFF2CC", fill_type="solid") # ไฮไลท์พื้นหลังสีครีมอ่อน
+        summary_cell.alignment = Alignment(wrap_text=True, vertical="center", horizontal="left")
+        
+        # วาดตารางข้อมูลลง Dashboard
         for t_df, title, r, c in dash_layouts:
             t_df.to_excel(writer, sheet_name=dash_sheet_name, startrow=r, startcol=c, index=False)
-            ws = writer.sheets[dash_sheet_name]
             
             cell = ws.cell(row=r, column=c+1, value=title)
             cell.font = Font(bold=True, color="000080", size=12)
@@ -260,9 +270,28 @@ try:
                 header_cell.border = thin_border
                 
             for row_num in range(r + 2, r + 2 + len(t_df)):
+                # [เพิ่มใหม่ 3] ค้นหาและไฮไลท์แถว Grand Total ให้สวยงามอัตโนมัติ
+                is_total_row = ws.cell(row=row_num, column=c+1).value in ["Grand Total", "TH40", "TH44"]
                 for col_num in range(c + 1, c + 1 + len(t_df.columns)):
-                    ws.cell(row=row_num, column=col_num).border = thin_border
+                    data_cell = ws.cell(row=row_num, column=col_num)
+                    data_cell.border = thin_border
+                    if is_total_row:
+                        data_cell.fill = total_fill
+                        data_cell.font = total_font
 
+        # [เพิ่มใหม่ 4] วาดกราฟวงกลม (Pie Chart) แสดงสัดส่วนตาม Plant ของคลังสินค้า
+        print("กำลังประมวลผลฝังแผนภูมิและสถิติภาพลงในแผ่นงาน...")
+        pie = PieChart()
+        labels = Reference(ws, min_col=2, min_row=7, max_row=8)  # อ้างอิง B7:B8 (TH40, TH44)
+        chart_data = Reference(ws, min_col=4, min_row=6, max_row=8)  # อ้างอิง D6:D8 (Stock Value THB.)
+        pie.add_data(chart_data, titles_from_data=True)
+        pie.set_categories(labels)
+        pie.title = "Stock Value Distribution by Plant"
+        pie.width = 14
+        pie.height = 7
+        ws.add_chart(pie, "P6") # แปะกราฟไว้ที่ตำแหน่งคอลัมน์ P แถวที่ 6 ด้านขวาตารางพอดี
+
+        # เซฟตารางแผ่นงานอื่นๆ เข้าสู่ระบบ
         df_data.to_excel(writer, sheet_name='DATA', index=False)
         df_summary.to_excel(writer, sheet_name='Ageing > 365 D', index=False)
         
@@ -272,28 +301,29 @@ try:
         r138_th44.to_excel(writer, sheet_name='R138_TH44', index=False)
         product_group.to_excel(writer, sheet_name='Product Group', index=False)
 
+        # ทำกระบวนการปรับแต่งขนาดความกว้างและตีกรอบให้ชีทอื่นๆ ทั้งหมด
         for sheet_name in writer.sheets:
-            ws = writer.sheets[sheet_name]
-            for col in ws.columns:
+            target_ws = writer.sheets[sheet_name]
+            for col in target_ws.columns:
                 max_len = 0
                 col_letter = get_column_letter(col[0].column)
                 for cell in col:
                     if cell.value is not None:
                         max_len = max(max_len, len(str(cell.value)))
-                ws.column_dimensions[col_letter].width = max(max_len + 4, 12)
+                target_ws.column_dimensions[col_letter].width = max(max_len + 4, 12)
                 
             if sheet_name != dash_sheet_name:
-                for col_num in range(1, ws.max_column + 1):
-                    header_cell = ws.cell(row=1, column=col_num)
-                    header_cell.fill = header_fill
-                    header_cell.font = header_font
-                    header_cell.border = thin_border
+                for col_num in range(1, target_ws.max_column + 1):
+                    h_cell = target_ws.cell(row=1, column=col_num)
+                    h_cell.fill = header_fill
+                    h_cell.font = header_font
+                    h_cell.border = thin_border
                 
-                for row in ws.iter_rows(min_row=2, max_row=ws.max_row, min_col=1, max_col=ws.max_column):
+                for row in target_ws.iter_rows(min_row=2, max_row=target_ws.max_row, min_col=1, max_col=target_ws.max_column):
                     for cell in row:
                         cell.border = thin_border
 
-    print(f"\n[สำเร็จ] ประมวลผลและสร้าง Dashboard เสร็จสิ้นแบบ 100%!")
+    print(f"\n[สำเร็จ] ประมวลผลและสร้าง Dashboard พร้อมระบบสถิติรูปภาพเสร็จสิ้นแบบ 100%!")
     print(f"-> ไฟล์รายงานพร้อมใช้งานถูกสร้างขึ้นแล้วที่: {output_path}")
 
 except Exception as e:
