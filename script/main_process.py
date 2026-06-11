@@ -2,8 +2,7 @@ import os
 import pandas as pd
 import numpy as np
 from openpyxl.utils import get_column_letter
-from openpyxl.styles import Font, PatternFill, Border, Side, Alignment  # เพิ่ม Alignment สำหรับจัดข้อความสรุป
-from openpyxl.chart import PieChart, Reference  # [เพิ่มใหม่] นำเข้าโมดูลสำหรับวาดกราฟลง Excel
+from openpyxl.styles import Font, PatternFill, Border, Side, Alignment
 
 # ==========================================
 # ⚠️ กำหนดตำแหน่ง Path โฟลเดอร์ของ Windows
@@ -105,7 +104,7 @@ try:
 
     bins = [-np.inf, 30, 90, 180, 365, np.inf]
     labels = ["0-30", "31-90", "91-180", "181-365", ">365"]
-    df_data['Bucket'] = pd.cut(df_data['Ageing'], bins=bins=bins, labels=labels)
+    df_data['Bucket'] = pd.cut(df_data['Ageing'], bins=bins, labels=labels)  # [แก้ไขคำผิดแล้ว]
 
     final_columns_order = [
         'Plant', 'Storage location', 'Material', 'Unrestricted', 'Value Unrestricted',
@@ -153,17 +152,24 @@ try:
 
     print("\n--- เริ่มต้นขั้นตอนที่ 5: การสร้าง Dashboard สรุปผล 5 ตาราง (PV DATA) ---")
     
+    # [ปรับปรุง] เพิ่มการรันลำดับ (Ranking) ให้กับตาราง Client
     def make_client_table(df, denominator):
         if df.empty:
-            return pd.DataFrame({'Client': ['Grand Total'], 'Quantity': [0], 'Stock Value THB.': [0], '%': [0]})
+            return pd.DataFrame({'No.': [''], 'Client': ['Grand Total'], 'Quantity': [0], 'Stock Value THB.': [0], '%': [0]})
         grouped = df.groupby('Shipper')[['Unrestricted', 'Value Unrestricted']].sum().reset_index()
         grouped.rename(columns={'Shipper': 'Client', 'Unrestricted': 'Quantity', 'Value Unrestricted': 'Stock Value THB.'}, inplace=True)
         grouped['%'] = (grouped['Stock Value THB.'] / denominator * 100).round(2) if denominator else 0
-        grouped = grouped.sort_values(by='Stock Value THB.', ascending=False)
+        grouped = grouped.sort_values(by='Stock Value THB.', ascending=False).reset_index(drop=True)
+        
+        # แทรกคอลัมน์ลำดับที่ (1, 2, 3...) ไว้หน้าสุด
+        grouped.insert(0, 'No.', range(1, len(grouped) + 1))
         
         gt_row = pd.DataFrame({
-            'Client': ['Grand Total'], 'Quantity': [grouped['Quantity'].sum()],
-            'Stock Value THB.': [grouped['Stock Value THB.'].sum()], '%': [grouped['%'].sum().round(2)]
+            'No.': [''],
+            'Client': ['Grand Total'], 
+            'Quantity': [grouped['Quantity'].sum()],
+            'Stock Value THB.': [grouped['Stock Value THB.'].sum()], 
+            '%': [grouped['%'].sum().round(2)]
         })
         return pd.concat([grouped, gt_row], ignore_index=True)
 
@@ -216,21 +222,24 @@ try:
 
     df_plant_report = make_plant_table(df_data)
 
-    # [ปรับปรุง 1] ย้ายตำแหน่งการวาดตารางลงมาด้านล่าง 4 บรรทัด (startrow บวกเพิ่ม 4) เพื่อเปิดพื้นที่ให้ Executive Summary
+    # เลื่อนตารางให้คอลัมน์รับกับตัวแปร No. ที่เพิ่มเข้ามา
     dash_layouts = [
         (df_plant_report, "Plant Report", 5, 1),
         (df_pg_report, "Product Group Report", 5 + len(df_plant_report) + 3, 1),
         (df_ageing_report, "Ageing Report", 5 + len(df_plant_report) + 3 + len(df_pg_report) + 3, 1),
         (df_inv_all, "Inventory Clients (THB)", 5, 6),
-        (df_inv_365, "Inventory Clients (THB) (>365)", 5, 11)
+        (df_inv_365, "Inventory Clients (THB) (>365)", 5, 12) # ขยับคอลัมน์หนีเพื่อให้มีช่องว่างให้อ่านง่าย
     ]
 
     print("\n--- กำลังบันทึกและจัดรูปแบบเอกสารขั้นสุดท้าย ---")
     os.makedirs(OUTPUT_DIR, exist_ok=True)
     output_path = os.path.join(OUTPUT_DIR, "Result_Report.xlsx")
 
+    # กำหนดชุดสีสำหรับการไฮไลท์ (Color Palette)
     header_fill = PatternFill(start_color="D9D9D9", end_color="D9D9D9", fill_type="solid")
-    total_fill = PatternFill(start_color="D9E1F2", end_color="D9E1F2", fill_type="solid") # [เพิ่มใหม่] สีน้ำเงินอ่อนสำหรับแถวรวม
+    total_fill = PatternFill(start_color="D9E1F2", end_color="D9E1F2", fill_type="solid") 
+    top10_fill = PatternFill(start_color="FFF2CC", end_color="FFF2CC", fill_type="solid") # [เพิ่มใหม่] สีเหลืองทองอ่อนสำหรับ Top 10
+    
     thin_border = Border(left=Side(style='thin'), right=Side(style='thin'), top=Side(style='thin'), bottom=Side(style='thin'))
     header_font = Font(bold=True)
     total_font = Font(bold=True, color="000000")
@@ -240,7 +249,6 @@ try:
         pd.DataFrame().to_excel(writer, sheet_name=dash_sheet_name, index=False)
         ws = writer.sheets[dash_sheet_name]
         
-        # [เพิ่มใหม่ 2] เขียนข้อความสรุปวิเคราะห์ผู้บริหารระดับสูง (Automated Executive Summary)
         pct_365 = round((total_365_val / grand_total_value * 100), 2) if grand_total_value else 0
         top_client_365 = df_inv_365.iloc[0]['Client'] if len(df_inv_365) > 1 else "N/A"
         
@@ -249,49 +257,50 @@ try:
             f"Dead Stock (>365 Days) accounts for {total_365_val:,.2f} THB ({pct_365}% of total inventory). "
             f"The primary client driver for dead stock is '{top_client_365}'."
         )
-        ws.merge_cells("B2:N4")
+        ws.merge_cells("B2:P4")
         summary_cell = ws["B2"]
         summary_cell.value = summary_text
         summary_cell.font = Font(bold=True, color="002060", size=11)
-        summary_cell.fill = PatternFill(start_color="FFF2CC", end_color="FFF2CC", fill_type="solid") # ไฮไลท์พื้นหลังสีครีมอ่อน
+        summary_cell.fill = PatternFill(start_color="E2EFDA", end_color="E2EFDA", fill_type="solid") # เปลี่ยนพื้นหลังข้อความเป็นสีเขียวอ่อนสวยๆ
         summary_cell.alignment = Alignment(wrap_text=True, vertical="center", horizontal="left")
         
-        # วาดตารางข้อมูลลง Dashboard
+        # กระบวนการวาดตารางและเทสี
         for t_df, title, r, c in dash_layouts:
             t_df.to_excel(writer, sheet_name=dash_sheet_name, startrow=r, startcol=c, index=False)
             
             cell = ws.cell(row=r, column=c+1, value=title)
             cell.font = Font(bold=True, color="000080", size=12)
             
+            # วาดหัวตาราง
             for col_num in range(c + 1, c + 1 + len(t_df.columns)):
                 header_cell = ws.cell(row=r+1, column=col_num)
                 header_cell.fill = header_fill
                 header_cell.font = header_font
                 header_cell.border = thin_border
                 
+            # วาดข้อมูลและจัดการ Conditional Formatting (สี)
             for row_num in range(r + 2, r + 2 + len(t_df)):
-                # [เพิ่มใหม่ 3] ค้นหาและไฮไลท์แถว Grand Total ให้สวยงามอัตโนมัติ
-                is_total_row = ws.cell(row=row_num, column=c+1).value in ["Grand Total", "TH40", "TH44"]
+                
+                # เช็คว่าเป็นบรรทัดผลรวม (Grand Total / TH40 / TH44) หรือไม่
+                val_col1 = str(ws.cell(row=row_num, column=c+1).value)
+                val_col2 = str(ws.cell(row=row_num, column=c+2).value)
+                is_total_row = (val_col1 in ["Grand Total", "TH40", "TH44"]) or (val_col2 in ["Grand Total"])
+                
+                # [เพิ่มใหม่] เช็คว่าเป็นตาราง Client และอยู่ใน Top 10 หรือไม่ (ไม่รวมบรรทัด Total)
+                is_client_table = "Clients" in title
+                is_top_10 = is_client_table and (row_num < r + 2 + 10) and not is_total_row
+
                 for col_num in range(c + 1, c + 1 + len(t_df.columns)):
                     data_cell = ws.cell(row=row_num, column=col_num)
                     data_cell.border = thin_border
+                    
+                    # สั่งเทสีตามเงื่อนไข
                     if is_total_row:
                         data_cell.fill = total_fill
                         data_cell.font = total_font
+                    elif is_top_10:
+                        data_cell.fill = top10_fill
 
-        # [เพิ่มใหม่ 4] วาดกราฟวงกลม (Pie Chart) แสดงสัดส่วนตาม Plant ของคลังสินค้า
-        print("กำลังประมวลผลฝังแผนภูมิและสถิติภาพลงในแผ่นงาน...")
-        pie = PieChart()
-        labels = Reference(ws, min_col=2, min_row=7, max_row=8)  # อ้างอิง B7:B8 (TH40, TH44)
-        chart_data = Reference(ws, min_col=4, min_row=6, max_row=8)  # อ้างอิง D6:D8 (Stock Value THB.)
-        pie.add_data(chart_data, titles_from_data=True)
-        pie.set_categories(labels)
-        pie.title = "Stock Value Distribution by Plant"
-        pie.width = 14
-        pie.height = 7
-        ws.add_chart(pie, "P6") # แปะกราฟไว้ที่ตำแหน่งคอลัมน์ P แถวที่ 6 ด้านขวาตารางพอดี
-
-        # เซฟตารางแผ่นงานอื่นๆ เข้าสู่ระบบ
         df_data.to_excel(writer, sheet_name='DATA', index=False)
         df_summary.to_excel(writer, sheet_name='Ageing > 365 D', index=False)
         
@@ -301,7 +310,6 @@ try:
         r138_th44.to_excel(writer, sheet_name='R138_TH44', index=False)
         product_group.to_excel(writer, sheet_name='Product Group', index=False)
 
-        # ทำกระบวนการปรับแต่งขนาดความกว้างและตีกรอบให้ชีทอื่นๆ ทั้งหมด
         for sheet_name in writer.sheets:
             target_ws = writer.sheets[sheet_name]
             for col in target_ws.columns:
@@ -323,7 +331,7 @@ try:
                     for cell in row:
                         cell.border = thin_border
 
-    print(f"\n[สำเร็จ] ประมวลผลและสร้าง Dashboard พร้อมระบบสถิติรูปภาพเสร็จสิ้นแบบ 100%!")
+    print(f"\n[สำเร็จ] ประมวลผลและสร้าง Dashboard แบบเน้นวิเคราะห์ (Ranking) เสร็จสิ้น 100%!")
     print(f"-> ไฟล์รายงานพร้อมใช้งานถูกสร้างขึ้นแล้วที่: {output_path}")
 
 except Exception as e:
