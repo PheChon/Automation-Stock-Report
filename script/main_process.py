@@ -141,7 +141,7 @@ try:
             
             row_data[f'Quantity {b}'] = qty
             row_data[f'Stock Value THB. {b}'] = val
-            row_data[f'% {b}'] = f"{pct:.2f}%"  # บังคับทศนิยม 2 ตำแหน่งเสมอ
+            row_data[f'% {b}'] = f"{pct:.2f}%" 
             
             total_qty += qty
             total_val += val
@@ -159,16 +159,13 @@ try:
         grouped = df.groupby('Shipper')[['Unrestricted', 'Value Unrestricted']].sum().reset_index()
         grouped.rename(columns={'Shipper': 'Client', 'Unrestricted': 'Quantity', 'Value Unrestricted': 'Stock Value THB.'}, inplace=True)
         
-        # ค้นหาเปอร์เซ็นต์ของแต่ละแถว
         grouped['%_num'] = (grouped['Stock Value THB.'] / denominator * 100) if denominator else 0
         grouped = grouped.sort_values(by='Stock Value THB.', ascending=False).reset_index(drop=True)
         grouped.insert(0, 'No.', range(1, len(grouped) + 1))
         
-        # คำนวณเปอร์เซ็นต์รวมจาก ยอดรวมมูลค่า หารด้วย ฐาน (ป้องกันการบวกเศษทศนิยมที่ถูกปัดแล้ว)
         total_val = grouped['Stock Value THB.'].sum()
         sum_pct = (total_val / denominator * 100) if denominator else 0
         
-        # แปลงเป็น Format "XX.XX%"
         grouped['%'] = grouped['%_num'].apply(lambda x: f"{x:.2f}%")
         grouped.drop(columns=['%_num'], inplace=True)
         
@@ -245,7 +242,7 @@ try:
         (df_inv_365, "Inventory Clients (THB) (>365)", 5, 12)
     ]
 
-    print("\n--- กำลังบันทึกและจัดรูปแบบเอกสารขั้นสุดท้าย ---")
+    print("\n--- กำลังบันทึกและจัดรูปแบบเอกสารขั้นสุดท้าย (ใส่ลูกน้ำตัวเลข) ---")
     os.makedirs(OUTPUT_DIR, exist_ok=True)
     output_path = os.path.join(OUTPUT_DIR, "Result_Report.xlsx")
 
@@ -306,6 +303,14 @@ try:
                         data_cell.font = total_font
                     elif is_top_10:
                         data_cell.fill = top10_fill
+                        
+                    # [ปรับปรุง] สั่งเติมเครื่องหมาย Comma ผ่าน Excel Format 
+                    header_val = str(ws.cell(row=r+1, column=col_num).value)
+                    if isinstance(data_cell.value, (int, float)):
+                        if "Stock Value" in header_val or "Value" in header_val:
+                            data_cell.number_format = '#,##0.00'
+                        elif "Quantity" in header_val or "Unrestricted" in header_val:
+                            data_cell.number_format = '#,##0.##'
 
         df_data.to_excel(writer, sheet_name='DATA', index=False)
         df_summary.to_excel(writer, sheet_name='Ageing > 365 D', index=False)
@@ -318,6 +323,30 @@ try:
 
         for sheet_name in writer.sheets:
             target_ws = writer.sheets[sheet_name]
+            
+            # [ปรับปรุง] ตีเส้นขอบและใส่ Comma ให้กับชีทอื่นๆ (เช่น DATA, Ageing > 365)
+            if sheet_name != dash_sheet_name:
+                col_formats = {}
+                for col_num in range(1, target_ws.max_column + 1):
+                    h_cell = target_ws.cell(row=1, column=col_num)
+                    h_cell.fill = header_fill
+                    h_cell.font = header_font
+                    h_cell.border = thin_border
+                    
+                    h_val = str(h_cell.value)
+                    if "Stock Value" in h_val or "Value" in h_val:
+                        col_formats[col_num] = '#,##0.00'
+                    elif "Quantity" in h_val or "Unrestricted" in h_val:
+                        col_formats[col_num] = '#,##0.##'
+                
+                for row in target_ws.iter_rows(min_row=2, max_row=target_ws.max_row, min_col=1, max_col=target_ws.max_column):
+                    for cell in row:
+                        cell.border = thin_border
+                        # ใส่ Format ตัวเลขที่มีลูกน้ำ
+                        if cell.column in col_formats and isinstance(cell.value, (int, float)):
+                            cell.number_format = col_formats[cell.column]
+
+            # จัดขนาดความกว้างอัตโนมัติให้พอดี
             for col in target_ws.columns:
                 max_len = 0
                 col_letter = get_column_letter(col[0].column)
@@ -328,19 +357,8 @@ try:
                         max_len = max(max_len, len(str(cell.value)))
                 
                 target_ws.column_dimensions[col_letter].width = min(max(max_len + 2, 10), 45)
-                
-            if sheet_name != dash_sheet_name:
-                for col_num in range(1, target_ws.max_column + 1):
-                    h_cell = target_ws.cell(row=1, column=col_num)
-                    h_cell.fill = header_fill
-                    h_cell.font = header_font
-                    h_cell.border = thin_border
-                
-                for row in target_ws.iter_rows(min_row=2, max_row=target_ws.max_row, min_col=1, max_col=target_ws.max_column):
-                    for cell in row:
-                        cell.border = thin_border
 
-    print(f"\n[สำเร็จ] ประมวลผลและจัดรูปแบบเปอร์เซ็นต์เสร็จสิ้น 100%!")
+    print(f"\n[สำเร็จ] ประมวลผล ใส่จุลภาค (Comma) และจัดรูปแบบเสร็จสมบูรณ์ 100%!")
     print(f"-> ไฟล์รายงานพร้อมใช้งานถูกสร้างขึ้นแล้วที่: {output_path}")
 
 except Exception as e:
