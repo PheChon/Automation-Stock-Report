@@ -137,12 +137,11 @@ try:
                 qty = val = 0
             
             b_total = bucket_totals.get(b, 0)
-            pct = round((val / b_total) * 100, 2) if b_total > 0 else 0
+            pct = (val / b_total) * 100 if b_total > 0 else 0
             
             row_data[f'Quantity {b}'] = qty
             row_data[f'Stock Value THB. {b}'] = val
-            # [ปรับปรุง] เติม % ลงท้ายในหน้าแนวกว้าง
-            row_data[f'% {b}'] = f"{pct}%"
+            row_data[f'% {b}'] = f"{pct:.2f}%"  # บังคับทศนิยม 2 ตำแหน่งเสมอ
             
             total_qty += qty
             total_val += val
@@ -156,24 +155,29 @@ try:
     
     def make_client_table(df, denominator):
         if df.empty:
-            return pd.DataFrame({'No.': [''], 'Client': ['Grand Total'], 'Quantity': [0], 'Stock Value THB.': [0], '%': ['0%']})
+            return pd.DataFrame({'No.': [''], 'Client': ['Grand Total'], 'Quantity': [0], 'Stock Value THB.': [0], '%': ['0.00%']})
         grouped = df.groupby('Shipper')[['Unrestricted', 'Value Unrestricted']].sum().reset_index()
         grouped.rename(columns={'Shipper': 'Client', 'Unrestricted': 'Quantity', 'Value Unrestricted': 'Stock Value THB.'}, inplace=True)
-        grouped['%'] = (grouped['Stock Value THB.'] / denominator * 100).round(2) if denominator else 0
+        
+        # ค้นหาเปอร์เซ็นต์ของแต่ละแถว
+        grouped['%_num'] = (grouped['Stock Value THB.'] / denominator * 100) if denominator else 0
         grouped = grouped.sort_values(by='Stock Value THB.', ascending=False).reset_index(drop=True)
-        
         grouped.insert(0, 'No.', range(1, len(grouped) + 1))
-        sum_pct = grouped['%'].sum().round(2)
         
-        # [ปรับปรุง] แปลงเป็นตัวหนังสือแล้วเติม %
-        grouped['%'] = grouped['%'].astype(str) + '%'
+        # คำนวณเปอร์เซ็นต์รวมจาก ยอดรวมมูลค่า หารด้วย ฐาน (ป้องกันการบวกเศษทศนิยมที่ถูกปัดแล้ว)
+        total_val = grouped['Stock Value THB.'].sum()
+        sum_pct = (total_val / denominator * 100) if denominator else 0
+        
+        # แปลงเป็น Format "XX.XX%"
+        grouped['%'] = grouped['%_num'].apply(lambda x: f"{x:.2f}%")
+        grouped.drop(columns=['%_num'], inplace=True)
         
         gt_row = pd.DataFrame({
             'No.': [''],
             'Client': ['Grand Total'], 
             'Quantity': [grouped['Quantity'].sum()],
-            'Stock Value THB.': [grouped['Stock Value THB.'].sum()], 
-            '%': [f"{sum_pct}%"]
+            'Stock Value THB.': [total_val], 
+            '%': [f"{sum_pct:.2f}%"]
         })
         return pd.concat([grouped, gt_row], ignore_index=True)
 
@@ -188,8 +192,8 @@ try:
             if p_data.empty: continue
             
             p_qty, p_val = p_data['Unrestricted'].sum(), p_data['Value Unrestricted'].sum()
-            p_pct = round((p_val / grand_total_value) * 100, 2) if grand_total_value else 0
-            rows.append({'Category': p, 'Quantity': p_qty, 'Stock Value THB.': p_val, '%': f"{p_pct}%"})
+            p_pct = (p_val / grand_total_value) * 100 if grand_total_value else 0
+            rows.append({'Category': p, 'Quantity': p_qty, 'Stock Value THB.': p_val, '%': f"{p_pct:.2f}%"})
             
             sub_groups = ["0-30", "31-90", "91-180", "181-365", ">365"] if group_col == 'Bucket' else sorted(p_data[group_col].dropna().unique())
             for sg in sub_groups:
@@ -202,14 +206,14 @@ try:
                 else:
                     denominator = grand_total_value
                     
-                sg_pct = round((sg_val / denominator) * 100, 2) if denominator > 0 else 0
-                rows.append({'Category': f"   {sg}", 'Quantity': sg_qty, 'Stock Value THB.': sg_val, '%': f"{sg_pct}%"})
+                sg_pct = (sg_val / denominator) * 100 if denominator > 0 else 0
+                rows.append({'Category': f"   {sg}", 'Quantity': sg_qty, 'Stock Value THB.': sg_val, '%': f"{sg_pct:.2f}%"})
                 
-        gt_pct = round((df['Value Unrestricted'].sum() / grand_total_value) * 100, 2) if grand_total_value else 0
+        gt_pct = (df['Value Unrestricted'].sum() / grand_total_value) * 100 if grand_total_value else 0
         rows.append({
             'Category': 'Grand Total', 'Quantity': df['Unrestricted'].sum(),
             'Stock Value THB.': df['Value Unrestricted'].sum(), 
-            '%': f"{gt_pct}%"
+            '%': f"{gt_pct:.2f}%"
         })
         return pd.DataFrame(rows)
 
@@ -219,12 +223,16 @@ try:
     def make_plant_table(df):
         grouped = df.groupby('Plant')[['Unrestricted', 'Value Unrestricted']].sum().reset_index()
         grouped.rename(columns={'Unrestricted': 'Quantity', 'Value Unrestricted': 'Stock Value THB.'}, inplace=True)
-        grouped['%'] = (grouped['Stock Value THB.'] / grand_total_value * 100).round(2) if grand_total_value else 0
-        sum_pct = grouped['%'].sum().round(2)
         
-        grouped['%'] = grouped['%'].astype(str) + '%'
+        grouped['%_num'] = (grouped['Stock Value THB.'] / grand_total_value * 100) if grand_total_value else 0
+        total_val = grouped['Stock Value THB.'].sum()
+        sum_pct = (total_val / grand_total_value * 100) if grand_total_value else 0
+        
+        grouped['%'] = grouped['%_num'].apply(lambda x: f"{x:.2f}%")
+        grouped.drop(columns=['%_num'], inplace=True)
+        
         gt_row = pd.DataFrame({'Plant': ['Grand Total'], 'Quantity': [grouped['Quantity'].sum()],
-                               'Stock Value THB.': [grouped['Stock Value THB.'].sum()], '%': [f"{sum_pct}%"]})
+                               'Stock Value THB.': [total_val], '%': [f"{sum_pct:.2f}%"]})
         return pd.concat([grouped, gt_row], ignore_index=True)
 
     df_plant_report = make_plant_table(df_data)
@@ -315,12 +323,10 @@ try:
                 col_letter = get_column_letter(col[0].column)
                 for cell in col:
                     if cell.value is not None:
-                        # [ปรับปรุง] ข้ามการคำนวณความยาวของประโยค Executive Summary เพื่อไม่ให้คอลัมน์กว้างเกินไป
                         if sheet_name == dash_sheet_name and cell.row < 5:
                             continue
                         max_len = max(max_len, len(str(cell.value)))
                 
-                # [ปรับปรุง] บังคับความกว้างสูงสุด (Max Width) ให้พอดีตา
                 target_ws.column_dimensions[col_letter].width = min(max(max_len + 2, 10), 45)
                 
             if sheet_name != dash_sheet_name:
@@ -334,7 +340,7 @@ try:
                     for cell in row:
                         cell.border = thin_border
 
-    print(f"\n[สำเร็จ] ประมวลผลและสร้าง Dashboard แบบเน้นวิเคราะห์ (Ranking) เสร็จสิ้น 100%!")
+    print(f"\n[สำเร็จ] ประมวลผลและจัดรูปแบบเปอร์เซ็นต์เสร็จสิ้น 100%!")
     print(f"-> ไฟล์รายงานพร้อมใช้งานถูกสร้างขึ้นแล้วที่: {output_path}")
 
 except Exception as e:
