@@ -242,17 +242,22 @@ try:
         (df_inv_365, "Inventory Clients (THB) (>365)", 5, 12)
     ]
 
-    print("\n--- กำลังบันทึกและจัดรูปแบบเอกสารขั้นสุดท้าย (ปรับ Format ตัวเลข) ---")
+    print("\n--- กำลังบันทึกและจัดรูปแบบเอกสารขั้นสุดท้าย (ปรับฟอนต์และตัวเลข) ---")
     os.makedirs(OUTPUT_DIR, exist_ok=True)
     output_path = os.path.join(OUTPUT_DIR, "Result_Report.xlsx")
 
+    # [การตั้งค่า Font] 
+    FONT_NAME = "Segoe UI"
+    
     header_fill = PatternFill(start_color="D9D9D9", end_color="D9D9D9", fill_type="solid")
     total_fill = PatternFill(start_color="D9E1F2", end_color="D9E1F2", fill_type="solid") 
     top10_fill = PatternFill(start_color="FFF2CC", end_color="FFF2CC", fill_type="solid") 
     
     thin_border = Border(left=Side(style='thin'), right=Side(style='thin'), top=Side(style='thin'), bottom=Side(style='thin'))
-    header_font = Font(bold=True)
-    total_font = Font(bold=True, color="000000")
+    
+    header_font = Font(name=FONT_NAME, bold=True)
+    total_font = Font(name=FONT_NAME, bold=True, color="000000")
+    data_font = Font(name=FONT_NAME)
 
     with pd.ExcelWriter(output_path, engine='openpyxl') as writer:
         dash_sheet_name = 'PV DATA (Dashboard)'
@@ -270,7 +275,7 @@ try:
         ws.merge_cells("B2:P4")
         summary_cell = ws["B2"]
         summary_cell.value = summary_text
-        summary_cell.font = Font(bold=True, color="002060", size=11)
+        summary_cell.font = Font(name=FONT_NAME, bold=True, color="002060", size=11)
         summary_cell.fill = PatternFill(start_color="E2EFDA", end_color="E2EFDA", fill_type="solid")
         summary_cell.alignment = Alignment(wrap_text=True, vertical="center", horizontal="left")
         
@@ -278,7 +283,7 @@ try:
             t_df.to_excel(writer, sheet_name=dash_sheet_name, startrow=r, startcol=c, index=False)
             
             cell = ws.cell(row=r, column=c+1, value=title)
-            cell.font = Font(bold=True, color="000080", size=12)
+            cell.font = Font(name=FONT_NAME, bold=True, color="000080", size=12)
             
             for col_num in range(c + 1, c + 1 + len(t_df.columns)):
                 header_cell = ws.cell(row=r+1, column=col_num)
@@ -297,6 +302,7 @@ try:
                 for col_num in range(c + 1, c + 1 + len(t_df.columns)):
                     data_cell = ws.cell(row=row_num, column=col_num)
                     data_cell.border = thin_border
+                    data_cell.font = data_font
                     
                     if is_total_row:
                         data_cell.fill = total_fill
@@ -304,13 +310,12 @@ try:
                     elif is_top_10:
                         data_cell.fill = top10_fill
                         
-                    # [แก้ไขจุดทศนิยม] บังคับ Format Quantity ให้เป็นจำนวนเต็มเท่านั้น
                     header_val = str(ws.cell(row=r+1, column=col_num).value)
                     if isinstance(data_cell.value, (int, float)):
                         if "Stock Value" in header_val or "Value" in header_val:
                             data_cell.number_format = '#,##0.00'
                         elif "Quantity" in header_val or "Unrestricted" in header_val:
-                            data_cell.number_format = '#,##0'  # ลบ .## ออกเพื่อซ่อนจุดทศนิยมทิ้ง
+                            data_cell.number_format = '#,##0'
 
         df_data.to_excel(writer, sheet_name='DATA', index=False)
         df_summary.to_excel(writer, sheet_name='Ageing > 365 D', index=False)
@@ -332,16 +337,16 @@ try:
                     h_cell.font = header_font
                     h_cell.border = thin_border
                     
-                    # [แก้ไขจุดทศนิยม] บังคับ Format Quantity ให้เป็นจำนวนเต็มเท่านั้น
                     h_val = str(h_cell.value)
                     if "Stock Value" in h_val or "Value" in h_val:
                         col_formats[col_num] = '#,##0.00'
                     elif "Quantity" in h_val or "Unrestricted" in h_val:
-                        col_formats[col_num] = '#,##0'  # ลบ .## ออกเพื่อซ่อนจุดทศนิยมทิ้ง
+                        col_formats[col_num] = '#,##0'
                 
                 for row in target_ws.iter_rows(min_row=2, max_row=target_ws.max_row, min_col=1, max_col=target_ws.max_column):
                     for cell in row:
                         cell.border = thin_border
+                        cell.font = data_font
                         if cell.column in col_formats and isinstance(cell.value, (int, float)):
                             cell.number_format = col_formats[cell.column]
 
