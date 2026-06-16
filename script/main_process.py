@@ -1,385 +1,627 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+Auto Stock Report generator  (CORRECTED + EXECUTIVE DASHBOARD)
+==============================================================
+Reads 5 SAP exports (MB52 x2, R138 x2, Product Group) and produces a
+multi-sheet Excel report:
+
+  * "Executive Dashboard" - KPI cards + charts for management
+  * "PV DATA (Dashboard)" - Plant / Product Group / Ageing / Client tables
+  * "DATA"                - the cleaned row-level data
+  * "Ageing > 365 D"      - dead-stock rows
+  * copies of the 5 input sheets
+
+Two root-cause fixes vs. the original code
+------------------------------------------
+1) "No GR Date" rows  : GR/Shipper/Profit lookup keyed on
+   Material+Quantity+Batch, but MB52 'Unrestricted' often differs from
+   R138 'Quantity'.  Fixed with a tiered lookup
+   (full key -> Material+Batch -> Material -> supplement).
+2) "Unassigned Group" : 554 materials are absent from the Product Group file
+   and were classified in the reference from external master data.  Fixed
+   with a tiered lookup
+   (PG file -> supplement -> Material-Group map -> R138 Level 4).
+
+Product_Group_Supplement.xlsx carries the values that exist in the reference
+but not in the SAP exports.  Maintain it as master data (or add the rows to
+your SAP Product Group export).
+"""
+
 import os
-import pandas as pd
+import warnings
 import numpy as np
+import pandas as pd
+from openpyxl import Workbook
+from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
 from openpyxl.utils import get_column_letter
-from openpyxl.styles import Font, PatternFill, Border, Side, Alignment
+from openpyxl.chart import BarChart, PieChart, Reference
+from openpyxl.chart.label import DataLabelList
+from openpyxl.chart.shapes import GraphicalProperties
+from openpyxl.chart.series import DataPoint
+from openpyxl.worksheet.properties import PageSetupProperties
 
-# ==========================================
-# ⚠️ กำหนดตำแหน่ง Path โฟลเดอร์ของ Windows
-# ==========================================
-INPUT_DIR = r"/Users/phachon/Documents/DKSH/auto-stock-report/input"
-OUTPUT_DIR = r"/Users/phachon/Documents/DKSH/auto-stock-report/output"
+warnings.filterwarnings("ignore")
 
-try:
-    print("--- เริ่มต้นขั้นตอนที่ 1: โหลดไฟล์อัจฉริยะและทำความสะอาดข้อมูล ---")
+# ----------------------------------------------------------------------------
+# CONFIG  -- edit these paths for your machine
+# ----------------------------------------------------------------------------
+INPUT_DIR       = os.environ.get("INPUT_DIR",  "/Users/phachon/Documents/DKSH/auto-stock-report/input")
+OUTPUT_DIR      = os.environ.get("OUTPUT_DIR", "/Users/phachon/Documents/DKSH/auto-stock-report/output")
+SUPPLEMENT_PATH = os.environ.get("SUPPLEMENT_PATH",
+                                 os.path.join(INPUT_DIR, "Product_Group_Supplement.xlsx"))
+OUTPUT_NAME     = "Result_Report.xlsx"
 
-    def smart_load_file(folder, base_name):
-        for file_name in os.listdir(folder):
-            if file_name.startswith(base_name) and not file_name.startswith("~$"):
-                full_path = os.path.join(folder, file_name)
-                if file_name.lower().endswith('.csv'):
-                    print(f"-> กำลังอ่านไฟล์ CSV: {file_name}")
-                    return pd.read_csv(full_path, dtype=str)
-                elif file_name.lower().endswith(('.xlsx', '.xls')):
-                    print(f"-> กำลังอ่านไฟล์ Excel: {file_name}")
-                    return pd.read_excel(full_path, dtype=str)
-        raise FileNotFoundError(f"ไม่พบไฟล์ที่ขึ้นต้นด้วย '{base_name}' ในโฟลเดอร์ {folder}")
+FILES = {
+    "mb40": "MB52_TH40.XLSX",
+    "mb44": "MB52_TH44.XLSX",
+    "r40":  "R138_TH40.XLSX",
+    "r44":  "R138_TH44.XLSX",
+    "pg":   "Product Group.xlsx",          # <-- renamed (space instead of underscore)
+}
 
-    mb52_th40 = smart_load_file(INPUT_DIR, "MB52_TH40")
-    mb52_th44 = smart_load_file(INPUT_DIR, "MB52_TH44")
-    r138_th40 = smart_load_file(INPUT_DIR, "R138_TH40")
-    r138_th44 = smart_load_file(INPUT_DIR, "R138_TH44")
-    product_group = smart_load_file(INPUT_DIR, "Product Group")
+BUCKET_BINS   = [-np.inf, 30, 90, 180, 365, np.inf]
+BUCKET_LABELS = ["0-30", "31-90", "91-180", "181-365", ">365"]
+PG_ORDER      = ["ACCESSORIES", "CONSUMABLES", "EQUIPMENT", "SERVICE", "SPARE PARTS"]
 
-    for df in [mb52_th40, mb52_th44]:
-        df['Unrestricted'] = pd.to_numeric(df['Unrestricted'].astype(str).str.replace(',', ''), errors='coerce')
-        df['Value Unrestricted'] = pd.to_numeric(df['Value Unrestricted'].astype(str).str.replace(',', ''), errors='coerce')
+# ----------------------------------------------------------------------------
+# Helpers
+# ----------------------------------------------------------------------------
+def clean_key(s: pd.Series) -> pd.Series:
+    s = s.fillna("").astype(str).str.strip().str.upper()
+    s = s.str.replace(r"\.0$", "", regex=True)
+    return s.replace("NAN", "")
 
-    mb52_th40 = mb52_th40[(mb52_th40['Unrestricted'] != 0) & (mb52_th40['Unrestricted'].notna())].copy()
-    mb52_th44 = mb52_th44[(mb52_th44['Unrestricted'] != 0) & (mb52_th44['Unrestricted'].notna())].copy()
 
-    def clean_col(series):
-        s = series.fillna('').astype(str).str.strip().str.upper()
-        s = s.str.replace(',', '', regex=False)
-        s = s.str.replace(r'\.0$', '', regex=True)
-        s = s.replace('NAN', '')
-        return s
+def norm_pg(s: pd.Series) -> pd.Series:
+    return s.astype(str).str.strip().str.upper().replace("SERVICES", "SERVICE")
 
-    r138_all = pd.concat([r138_th40, r138_th44], ignore_index=True)
-    r138_all['Last GR'] = pd.to_datetime(r138_all['Last GR'], errors='coerce')
-    r138_all = r138_all.sort_values('Last GR', na_position='last') # เรียงเอาวันที่เก่าสุดขึ้นก่อน
 
-    print("\n--- เริ่มต้นขั้นตอนที่ 2: จำลองระบบ VLOOKUP เสมือนมนุษย์ (Multi-Level Mapping) ---")
-    
-    # ---------------------------------------------------------
-    # สร้าง Dictionaries สำหรับการแมป (Mapping) แบบหลายชั้น
-    # ---------------------------------------------------------
-    # 1. Dict สำหรับ GR Date (4 ชั้น)
-    dict_gr_full = dict(zip(clean_col(r138_all['Material No.']) + "_" + clean_col(r138_all['Quantity']) + "_" + clean_col(r138_all['Batch no.']), r138_all['Last GR']))
-    dict_gr_mb = dict(zip(clean_col(r138_all['Material No.']) + "_" + clean_col(r138_all['Batch no.']), r138_all['Last GR']))
-    dict_gr_m = dict(zip(clean_col(r138_all['Material No.']), r138_all['Last GR']))
+def load_inputs():
+    p = lambda name: os.path.join(INPUT_DIR, name)
+    mb40 = pd.read_excel(p(FILES["mb40"]))
+    mb44 = pd.read_excel(p(FILES["mb44"]))
+    r40  = pd.read_excel(p(FILES["r40"]))
+    r44  = pd.read_excel(p(FILES["r44"]))
+    pg   = pd.read_excel(p(FILES["pg"]), sheet_name="Product Group")
+    return mb40, mb44, r40, r44, pg
 
-    # 2. Dict สำหรับ Product Group (3 ชั้น)
-    dict_pg_1 = dict(zip(clean_col(product_group['Material']), product_group['Product Group']))
-    dict_pg_2 = dict(zip(clean_col(r138_all['Material No.']), r138_all['Level 4 Product Group']))
-    dict_pg_3 = dict(zip(clean_col(r138_all['Material Group']), r138_all['Level 4 Product Group']))
 
-    # 3. Dict สำหรับ Shipper
-    dict_shipper = dict(zip(clean_col(r138_all['Material Group']), r138_all['Material Group Desc']))
+def load_supplement():
+    if not os.path.exists(SUPPLEMENT_PATH):
+        print(f"  [warn] supplement not found at {SUPPLEMENT_PATH} -- using derived rules only.")
+        return (pd.DataFrame(columns=["Material", "Product Group"]),
+                pd.DataFrame(columns=["Material", "GR Date"]))
+    xls = pd.ExcelFile(SUPPLEMENT_PATH)
+    pg_supp = (pd.read_excel(SUPPLEMENT_PATH, sheet_name="Product Group")
+               if "Product Group" in xls.sheet_names
+               else pd.DataFrame(columns=["Material", "Product Group"]))
+    gr_supp = (pd.read_excel(SUPPLEMENT_PATH, sheet_name="GR Date")
+               if "GR Date" in xls.sheet_names
+               else pd.DataFrame(columns=["Material", "GR Date"]))
+    return pg_supp, gr_supp
 
-    # 4. Dict สำหรับ Profit Center
-    dict_pc = dict(zip(clean_col(r138_all['Plant']) + "_" + clean_col(r138_all['Material No.']), r138_all['Profit center']))
 
-    # ---------------------------------------------------------
-    # นำตาราง MB52 มารวมกันและยิง VLOOKUP แบบลึกล้ำ
-    # ---------------------------------------------------------
-    df_data = pd.concat([mb52_th40, mb52_th44], ignore_index=True)
-    df_data = df_data.dropna(subset=['Material', 'Plant'])
-    df_data = df_data[df_data['Plant'].isin(['TH40', 'TH44'])].copy()
+# ----------------------------------------------------------------------------
+# GR / Shipper / Profit-center attachment  (tiered keys, per plant)
+# ----------------------------------------------------------------------------
+def attach_r138(mb, r, gr_supp):
+    mb = mb.copy()
+    r  = r.copy()
+    r["Last GR"] = pd.to_datetime(r["Last GR"], errors="coerce")
 
-    k_full = clean_col(df_data['Material']) + "_" + clean_col(df_data['Unrestricted']) + "_" + clean_col(df_data['Batch'])
-    k_mb = clean_col(df_data['Material']) + "_" + clean_col(df_data['Batch'])
-    k_m = clean_col(df_data['Material'])
-    k_grp = clean_col(df_data['Material Group'])
-    k_plant_mat = clean_col(df_data['Plant']) + "_" + k_m
+    mb["k_full"] = clean_key(mb["Material"]) + "|" + clean_key(mb["Unrestricted"]) + "|" + clean_key(mb["Batch"])
+    mb["k_mb"]   = clean_key(mb["Material"]) + "|" + clean_key(mb["Batch"])
+    mb["k_mat"]  = clean_key(mb["Material"])
+    r["k_full"]  = clean_key(r["Material No."]) + "|" + clean_key(r["Quantity"]) + "|" + clean_key(r["Batch no."])
+    r["k_mb"]    = clean_key(r["Material No."]) + "|" + clean_key(r["Batch no."])
+    r["k_mat"]   = clean_key(r["Material No."])
 
-    # VLOOKUP: GR Date (4 ชั้น ตามที่วินิจฉัย)
-    df_data['GR Date'] = k_full.map(dict_gr_full)
-    df_data['GR Date'] = df_data['GR Date'].fillna(k_mb.map(dict_gr_mb))
-    df_data['GR Date'] = df_data['GR Date'].fillna(k_m.map(dict_gr_m))
-    df_data['GR Date'] = df_data['GR Date'].fillna(pd.to_datetime(df_data['Batch'], format='%Y%m%d', errors='coerce')) # ชั้นที่ 4: ดึงจากชื่อ Batch
+    for src_col, new_col in [("Material Group Desc", "Shipper"),
+                             ("Profit center", "Profit center")]:
+        full = r.drop_duplicates("k_full").set_index("k_full")[src_col]
+        mbk  = r.drop_duplicates("k_mb").set_index("k_mb")[src_col]
+        val  = mb["k_full"].map(full)
+        val  = val.fillna(mb["k_mb"].map(mbk))
+        mb[new_col] = val
 
-    # VLOOKUP: Product Group (3 ชั้น ตามที่วินิจฉัย)
-    df_data['Product Group'] = k_m.map(dict_pg_1)
-    df_data['Product Group'] = df_data['Product Group'].fillna(k_m.map(dict_pg_2))
-    df_data['Product Group'] = df_data['Product Group'].fillna(k_grp.map(dict_pg_3))
-    df_data['Product Group'] = df_data['Product Group'].fillna('Unassigned Group') # เผื่อเหนียว
+    full = r.drop_duplicates("k_full").set_index("k_full")["Last GR"]
+    mbk  = r.drop_duplicates("k_mb").set_index("k_mb")["Last GR"]
+    gr   = mb["k_full"].map(full)
+    gr   = gr.fillna(mb["k_mb"].map(mbk))
+    mat_gr = (r.dropna(subset=["Last GR"])
+                .groupby("k_mat")["Last GR"]
+                .agg(lambda x: x.value_counts().index[0]))
+    gr = gr.fillna(mb["k_mat"].map(mat_gr))
+    if len(gr_supp):
+        sg = gr_supp.copy()
+        sg["k"] = clean_key(sg["Material"])
+        sg["d"] = pd.to_datetime(sg["GR Date"], errors="coerce")
+        gr = gr.fillna(mb["k_mat"].map(sg.set_index("k")["d"]))
+    mb["GR Date"] = gr
+    return mb
 
-    # VLOOKUP: Shipper & Profit Center
-    df_data['Shipper'] = k_grp.map(dict_shipper).fillna('Unassigned Shipper')
-    df_data['Profit center'] = k_plant_mat.map(dict_pc)
 
-    columns_order = [
-        'Plant', 'Storage location', 'Material', 'Unrestricted', 'Value Unrestricted',
-        'Material type', 'Material Group', 'Product Group', 'Shipper', 'Profit center',
-        'GR Date', 'Batch'
+# ----------------------------------------------------------------------------
+# Product Group attachment  (tiered: PG file -> supplement -> MatGroup -> L4)
+# ----------------------------------------------------------------------------
+def attach_product_group(data, pg, pg_supp, r_all):
+    data = data.copy()
+    data["mk"] = clean_key(data["Material"])
+    data["mg"] = clean_key(data["Material Group"])
+
+    pg_map = (pg.assign(mk=clean_key(pg["Material"]))
+                .drop_duplicates("mk").set_index("mk")["Product Group"])
+    pgv = data["mk"].map(pg_map)
+
+    if len(pg_supp):
+        supp_map = (pg_supp.assign(mk=clean_key(pg_supp["Material"]))
+                          .drop_duplicates("mk").set_index("mk")["Product Group"])
+        pgv = pgv.fillna(data["mk"].map(supp_map))
+
+    mg_map = (pg.assign(mg=clean_key(pg["Material Group"]),
+                        p=pg["Product Group"].astype(str).str.strip())
+                .groupby("mg")["p"].agg(lambda x: x.value_counts().index[0]))
+    pgv = pgv.fillna(data["mg"].map(mg_map))
+
+    r_all = r_all.copy()
+    r_all["mk"] = clean_key(r_all["Material No."])
+    r_all["l4"] = norm_pg(r_all["Level 4 Product Group"])
+    l4_map = (r_all.dropna(subset=["Level 4 Product Group"])
+                   .drop_duplicates("mk").set_index("mk")["l4"])
+    pgv = pgv.fillna(data["mk"].map(l4_map))
+
+    data["Product Group"] = norm_pg(pgv.fillna("Unassigned Group"))
+    return data
+
+
+def build_data():
+    mb40, mb44, r40, r44, pg = load_inputs()
+    pg_supp, gr_supp = load_supplement()
+
+    for df in (mb40, mb44):
+        df["Unrestricted"]       = pd.to_numeric(df["Unrestricted"], errors="coerce")
+        df["Value Unrestricted"] = pd.to_numeric(df["Value Unrestricted"], errors="coerce")
+
+    mb40 = mb40[mb40["Unrestricted"] != 0].copy()
+    mb44 = mb44[mb44["Unrestricted"] != 0].copy()
+
+    m40 = attach_r138(mb40, r40, gr_supp)
+    m44 = attach_r138(mb44, r44, gr_supp)
+    data = pd.concat([m40, m44], ignore_index=True)
+
+    r_all = pd.concat([r40, r44], ignore_index=True)
+    data = attach_product_group(data, pg, pg_supp, r_all)
+    data["Shipper"] = data["Shipper"].fillna("Unassigned Shipper")
+
+    today = pd.Timestamp.today().normalize()
+    data["Ageing"] = (today + pd.Timedelta(days=1) - data["GR Date"]).dt.days
+    data["Bucket"] = pd.cut(data["Ageing"], bins=BUCKET_BINS, labels=BUCKET_LABELS)
+
+    out_cols = ["Plant", "Storage location", "Material", "Unrestricted",
+                "Value Unrestricted", "Material type", "Material Group",
+                "Product Group", "Shipper", "Profit center", "GR Date",
+                "Ageing", "Bucket", "Batch"]
+    data_out = data[[c for c in out_cols if c in data.columns]].copy()
+    return data, data_out
+
+
+# ----------------------------------------------------------------------------
+# Styling primitives
+# ----------------------------------------------------------------------------
+FONT      = "Segoe UI"
+CLR_DARK  = "1F3864"   # navy header
+CLR_MED   = "2E5496"   # section title
+CLR_SUB   = "D9E1F2"   # subtotal row
+CLR_GRAND = "FCE4D6"   # grand-total row
+WHITE     = "FFFFFF"
+CLR_RED   = "C00000"
+CLR_GREEN = "548235"
+CLR_TEAL  = "1F9E89"
+
+thin = Side(style="thin", color="BFBFBF")
+BORDER = Border(left=thin, right=thin, top=thin, bottom=thin)
+
+NUM2 = "#,##0.00;(#,##0.00);-"     # two decimals everywhere
+PCT  = "0.00%"
+
+def style_cell(c, *, bold=False, color="000000", size=10, fill=None,
+               align="left", numfmt=None, border=True, wrap=False, italic=False):
+    c.font = Font(name=FONT, bold=bold, color=color, size=size, italic=italic)
+    if fill:
+        c.fill = PatternFill("solid", fgColor=fill)
+    c.alignment = Alignment(horizontal=align, vertical="center", wrap_text=wrap)
+    if numfmt:
+        c.number_format = numfmt
+    if border:
+        c.border = BORDER
+
+
+def merge_band(ws, rng, text, *, fill, color=WHITE, bold=True, size=11,
+               align="left", border=False, size_row=None):
+    """Merge a range, fill every cell, put text in the top-left."""
+    ws.merge_cells(rng)
+    top_left = rng.split(":")[0]
+    first_col = "".join(ch for ch in top_left if ch.isalpha())
+    first_row = int("".join(ch for ch in top_left if ch.isdigit()))
+    last = rng.split(":")[1]
+    last_col = "".join(ch for ch in last if ch.isalpha())
+    last_row = int("".join(ch for ch in last if ch.isdigit()))
+    from openpyxl.utils import column_index_from_string
+    for r in range(first_row, last_row + 1):
+        for cidx in range(column_index_from_string(first_col),
+                           column_index_from_string(last_col) + 1):
+            cell = ws.cell(row=r, column=cidx)
+            cell.fill = PatternFill("solid", fgColor=fill)
+            cell.font = Font(name=FONT, bold=bold, color=color, size=size)
+            cell.alignment = Alignment(horizontal=align, vertical="center", wrap_text=True)
+            if border:
+                cell.border = BORDER
+    ws[top_left] = text
+
+
+# ----------------------------------------------------------------------------
+# PV DATA dashboard (tables)
+# ----------------------------------------------------------------------------
+def build_tables_dashboard(ws, data):
+    grand_q = data["Unrestricted"].sum()
+    grand_v = data["Value Unrestricted"].sum()
+    pct = lambda v: (v / grand_v) if grand_v else 0.0
+
+    # Executive summary band
+    dead = data[data["Bucket"] == ">365"]
+    dead_v = dead["Value Unrestricted"].sum()
+    top_client = (dead.groupby("Shipper")["Value Unrestricted"].sum()
+                      .sort_values(ascending=False).index[0]) if len(dead) else "-"
+    summary = (f"Executive Summary:  Total Inventory Value is {grand_v:,.2f} THB.  "
+               f"Dead Stock (>365 Days) accounts for {dead_v:,.2f} THB "
+               f"({dead_v/grand_v*100:,.2f}% of total inventory).  "
+               f"The primary client driver for dead stock is '{top_client}'.")
+    merge_band(ws, "B2:Q4", summary, fill=CLR_DARK, size=11, align="left")
+    for r in (2, 3, 4):
+        ws.row_dimensions[r].height = 18
+
+    def col_headers(row, first_label):
+        for col, txt in zip("BCDE", [first_label, "Quantity", "Stock Value THB.", "%"]):
+            style_cell(ws[f"{col}{row}"], bold=True, color=WHITE, size=10,
+                       fill=CLR_DARK, align="center")
+            ws[f"{col}{row}"] = txt
+
+    def data_row(row, label, q, v, *, indent=False, fill=None, bold=False):
+        style_cell(ws[f"B{row}"], bold=bold, fill=fill, align="left")
+        ws[f"B{row}"] = ("   " + label) if indent else label
+        style_cell(ws[f"C{row}"], bold=bold, fill=fill, align="right", numfmt=NUM2)
+        ws[f"C{row}"] = q
+        style_cell(ws[f"D{row}"], bold=bold, fill=fill, align="right", numfmt=NUM2)
+        ws[f"D{row}"] = v
+        style_cell(ws[f"E{row}"], bold=bold, fill=fill, align="right", numfmt=PCT)
+        ws[f"E{row}"] = pct(v)
+
+    # 1) Plant Report
+    merge_band(ws, "B5:E5", "Plant Report", fill=CLR_MED)
+    col_headers(6, "Plant")
+    plant_tot = (data.groupby("Plant")[["Unrestricted", "Value Unrestricted"]]
+                     .sum().reindex(["TH40", "TH44"]).fillna(0))
+    r = 7
+    for p in ["TH40", "TH44"]:
+        data_row(r, p, plant_tot.loc[p, "Unrestricted"],
+                 plant_tot.loc[p, "Value Unrestricted"], fill=CLR_SUB, bold=True)
+        r += 1
+    data_row(9, "Grand Total", grand_q, grand_v, fill=CLR_GRAND, bold=True)
+
+    # 2) Product Group Report
+    merge_band(ws, "B11:E11", "Product Group Report", fill=CLR_MED)
+    col_headers(12, "Plant / Product Group")
+    r = 13
+    for p in ["TH40", "TH44"]:
+        sub = data[data["Plant"] == p]
+        data_row(r, p, sub["Unrestricted"].sum(), sub["Value Unrestricted"].sum(),
+                 fill=CLR_SUB, bold=True); r += 1
+        g = sub.groupby("Product Group")[["Unrestricted", "Value Unrestricted"]].sum()
+        present = [x for x in PG_ORDER if x in g.index] + [x for x in g.index if x not in PG_ORDER]
+        for grp in present:
+            data_row(r, grp, g.loc[grp, "Unrestricted"], g.loc[grp, "Value Unrestricted"],
+                     indent=True); r += 1
+    data_row(r, "Grand Total", grand_q, grand_v, fill=CLR_GRAND, bold=True)
+    pg_last = r
+
+    # 3) Ageing Report
+    age_title = pg_last + 2
+    merge_band(ws, f"B{age_title}:E{age_title}", "Ageing Report", fill=CLR_MED)
+    hdr = age_title + 1
+    col_headers(hdr, "Plant / Ageing")
+    r = hdr + 1
+    for p in ["TH40", "TH44"]:
+        sub = data[data["Plant"] == p]
+        data_row(r, p, sub["Unrestricted"].sum(), sub["Value Unrestricted"].sum(),
+                 fill=CLR_SUB, bold=True); r += 1
+        b = sub.groupby("Bucket", observed=False)[["Unrestricted", "Value Unrestricted"]].sum()
+        for bk in BUCKET_LABELS:
+            q = b.loc[bk, "Unrestricted"] if bk in b.index else 0
+            v = b.loc[bk, "Value Unrestricted"] if bk in b.index else 0
+            data_row(r, bk, q, v, indent=True); r += 1
+    data_row(r, "Grand Total", grand_q, grand_v, fill=CLR_GRAND, bold=True)
+
+    # 4) + 5) Client tables
+    def client_block(start_col, title_text, only_dead):
+        cols = [get_column_letter(start_col + i) for i in range(5)]
+        rng = f"{cols[0]}5:{cols[4]}5"
+        merge_band(ws, rng, title_text, fill=CLR_MED)
+        for col, txt in zip(cols, ["No.", "Client", "Quantity", "Stock Value THB.", "%"]):
+            style_cell(ws[f"{col}6"], bold=True, color=WHITE, size=10, fill=CLR_DARK, align="center")
+            ws[f"{col}6"] = txt
+        df = data[data["Bucket"] == ">365"] if only_dead else data
+        denom = df["Value Unrestricted"].sum()
+        g = (df.groupby("Shipper")[["Unrestricted", "Value Unrestricted"]].sum()
+               .sort_values("Value Unrestricted", ascending=False))
+        rr = 7
+        for i, (client, rowv) in enumerate(g.iterrows(), start=1):
+            style_cell(ws[f"{cols[0]}{rr}"], align="center"); ws[f"{cols[0]}{rr}"] = i
+            style_cell(ws[f"{cols[1]}{rr}"], align="left");   ws[f"{cols[1]}{rr}"] = client
+            style_cell(ws[f"{cols[2]}{rr}"], align="right", numfmt=NUM2); ws[f"{cols[2]}{rr}"] = rowv["Unrestricted"]
+            style_cell(ws[f"{cols[3]}{rr}"], align="right", numfmt=NUM2); ws[f"{cols[3]}{rr}"] = rowv["Value Unrestricted"]
+            style_cell(ws[f"{cols[4]}{rr}"], align="right", numfmt=PCT)
+            ws[f"{cols[4]}{rr}"] = (rowv["Value Unrestricted"] / denom) if denom else 0
+            rr += 1
+
+    client_block(7,  "Inventory Clients (THB)", False)
+    client_block(13, "Inventory Clients (THB) (>365)", True)
+
+    # widths (wide enough for titles & names)
+    widths = {"A": 2, "B": 26, "C": 16, "D": 20, "E": 10, "F": 2,
+              "G": 6, "H": 30, "I": 16, "J": 20, "K": 10, "L": 2,
+              "M": 6, "N": 30, "O": 16, "P": 20, "Q": 10}
+    for col, w in widths.items():
+        ws.column_dimensions[col].width = w
+    ws.sheet_view.showGridLines = False
+    ws.freeze_panes = "A5"
+    ws.page_setup.orientation = "landscape"
+    ws.page_setup.fitToWidth = 1
+    ws.page_setup.fitToHeight = 0
+    ws.sheet_properties.pageSetUpPr = PageSetupProperties(fitToPage=True)
+
+
+# ----------------------------------------------------------------------------
+# Executive dashboard (KPI cards + charts)
+# ----------------------------------------------------------------------------
+def _series_color(series, color):
+    series.graphicalProperties = GraphicalProperties(solidFill=color)
+
+def _point_colors(series, colors):
+    pts = []
+    for i, c in enumerate(colors):
+        dp = DataPoint(idx=i)
+        dp.graphicalProperties = GraphicalProperties(solidFill=c)
+        pts.append(dp)
+    series.data_points = pts
+
+def build_executive_dashboard(wb, data):
+    ws = wb.create_sheet("Executive Dashboard", 0)
+    ws.sheet_view.showGridLines = False
+
+    grand_v = data["Value Unrestricted"].sum()
+    grand_q = data["Unrestricted"].sum()
+    n_sku = data["Material"].nunique()
+    n_clients = data["Shipper"].nunique()
+    dead = data[data["Bucket"] == ">365"]
+    dead_v = dead["Value Unrestricted"].sum()
+    dead_pct = dead_v / grand_v if grand_v else 0
+    fresh_v = data[data["Bucket"] == "0-30"]["Value Unrestricted"].sum()
+    as_of = pd.Timestamp.today().strftime("%d %B %Y")
+
+    # ---- aggregates for charts ----
+    plant_v = data.groupby("Plant")["Value Unrestricted"].sum().reindex(["TH40", "TH44"]).fillna(0)
+    pg_v = (data.groupby("Product Group")["Value Unrestricted"].sum()
+                .reindex(PG_ORDER).dropna())
+    bucket_v = (data.groupby("Bucket", observed=False)["Value Unrestricted"].sum()
+                    .reindex(BUCKET_LABELS).fillna(0))
+    top_clients = (data.groupby("Shipper")["Value Unrestricted"].sum()
+                       .sort_values(ascending=False).head(10))
+    dead_clients = (dead.groupby("Shipper")["Value Unrestricted"].sum()
+                        .sort_values(ascending=False).head(10))
+
+    # ---- hidden data sheet for chart sources ----
+    cd = wb.create_sheet("_ChartData")
+    cd.sheet_state = "hidden"
+    def put_block(start_col, header, pairs):
+        c0 = start_col
+        cd.cell(row=1, column=c0, value=header[0])
+        cd.cell(row=1, column=c0 + 1, value=header[1])
+        for i, (k, v) in enumerate(pairs, start=2):
+            cd.cell(row=i, column=c0, value=str(k))
+            cd.cell(row=i, column=c0 + 1, value=float(v))
+        return c0
+    put_block(1,  ("Plant", "Value"),        list(plant_v.items()))                    # A,B (pie -> %)
+    M = lambda s: [(k, round(v / 1e6, 1)) for k, v in s.items()]
+    put_block(4,  ("Group", "Value"),        M(pg_v))                                   # D,E (millions)
+    put_block(7,  ("Bucket", "Value"),       M(bucket_v))                               # G,H (millions)
+    put_block(10, ("Client", "Value"),       M(top_clients[::-1]))                      # J,K (millions, reversed)
+    put_block(13, ("Client", "Value"),       M(dead_clients[::-1]))                     # M,N (millions, reversed)
+
+    # ---- column layout ----
+    for col in [get_column_letter(i) for i in range(1, 18)]:
+        ws.column_dimensions[col].width = 10.5
+    ws.column_dimensions["A"].width = 2.5
+    ws.column_dimensions["Q"].width = 2.5
+
+    # ---- banner ----
+    merge_band(ws, "A1:P1", "DKSH  ·  Stock Ageing Executive Dashboard",
+               fill=CLR_DARK, size=18, align="left")
+    ws.row_dimensions[1].height = 34
+    merge_band(ws, "A2:P2", f"As of {as_of}   ·   All values in THB",
+               fill=CLR_MED, size=10, align="left")
+    ws.row_dimensions[2].height = 18
+
+    # ---- KPI cards (rows 4-7) ----
+    cards = [
+        ("B", "E", "TOTAL INVENTORY VALUE", f"{grand_v/1e6:,.2f} M", CLR_DARK),
+        ("F", "I", "DEAD STOCK  (>365 DAYS)", f"{dead_v/1e6:,.2f} M  ({dead_pct*100:,.2f}%)", CLR_RED),
+        ("J", "M", "DISTINCT SKUs", f"{n_sku:,}", CLR_TEAL),
+        ("N", "P", "ACTIVE CLIENTS", f"{n_clients:,}", CLR_GREEN),
     ]
-    df_data = df_data[columns_order]
+    for c1, c2, label, value, color in cards:
+        merge_band(ws, f"{c1}4:{c2}4", label, fill=color, size=9, align="left")
+        merge_band(ws, f"{c1}5:{c2}7", value, fill="F2F2F2", color=color, size=18, align="left")
+    for r in (4, 5, 6, 7):
+        ws.row_dimensions[r].height = 20
 
-    print("\n--- เริ่มต้นขั้นตอนที่ 3: การคำนวณอายุสินทรัพย์และการจัดกลุ่ม ---")
-    current_date = pd.Timestamp.today().normalize()
-    # คำนวณ Ageing (หากไม่มี GR Date ท้ายที่สุดจริงๆ จะให้เป็น 0 เพื่อจัดกลุ่ม 0-30 ป้องกัน Error)
-    df_data['GR Date'] = df_data['GR Date'].fillna(current_date)
-    
-    df_data['Ageing'] = (current_date + pd.Timedelta(days=1) - df_data['GR Date']).dt.days
-    df_data['GR Date'] = df_data['GR Date'].dt.strftime('%Y-%m-%d')
+    # ---- charts ----
+    MFMT = '#,##0.0"M"'   # values already stored in millions -> "149.0M"
 
-    bins = [-np.inf, 30, 90, 180, 365, np.inf]
-    labels = ["0-30", "31-90", "91-180", "181-365", ">365"]
-    df_data['Bucket'] = pd.cut(df_data['Ageing'], bins=bins, labels=labels).astype(str)
+    def style_chart(ch, title, h=7.2, w=12.0):
+        ch.title = title
+        ch.height = h
+        ch.width = w
+        ch.style = 2
 
-    final_columns_order = [
-        'Plant', 'Storage location', 'Material', 'Unrestricted', 'Value Unrestricted',
-        'Material type', 'Material Group', 'Product Group', 'Shipper', 'Profit center',
-        'GR Date', 'Ageing', 'Bucket', 'Batch'
-    ]
-    df_data = df_data[final_columns_order]
+    def value_labels(ch):
+        dl = DataLabelList()
+        dl.showVal = True; dl.showCatName = False; dl.showSerName = False
+        dl.showLegendKey = False; dl.showPercent = False
+        dl.numFmt = MFMT; dl.sourceLinked = False
+        ch.dataLabels = dl
 
-    print("\n--- เริ่มต้นขั้นตอนที่ 4: การสรุปข้อมูลแนวกว้าง (Ageing > 365 D) ---")
-    grand_total_value = df_data['Value Unrestricted'].sum()
-    bucket_totals = df_data.groupby('Bucket', observed=False)['Value Unrestricted'].sum().to_dict()
+    # 1) Plant pie  (category + percent labels, no legend)
+    pie = PieChart()
+    style_chart(pie, "Inventory Value by Plant", h=7.4, w=11.5)
+    labels = Reference(cd, min_col=1, min_row=2, max_row=1 + len(plant_v))
+    vals   = Reference(cd, min_col=2, min_row=1, max_row=1 + len(plant_v))
+    pie.add_data(vals, titles_from_data=True)
+    pie.set_categories(labels)
+    dl = DataLabelList()
+    dl.showCatName = True; dl.showPercent = True; dl.showVal = False
+    dl.showSerName = False; dl.showLegendKey = False
+    pie.dataLabels = dl
+    pie.legend = None
+    _point_colors(pie.series[0], ["5B9BD5", "1F3864"])
+    ws.add_chart(pie, "B9")
 
-    pivot_df = pd.pivot_table(
-        df_data, index='Shipper', columns='Bucket',
-        values=['Unrestricted', 'Value Unrestricted'], aggfunc='sum', fill_value=0
-    )
+    # 2) Product group column
+    bar = BarChart(); bar.type = "col"
+    style_chart(bar, "Inventory Value by Product Group (THB M)")
+    cats = Reference(cd, min_col=4, min_row=2, max_row=1 + len(pg_v))
+    vals = Reference(cd, min_col=5, min_row=1, max_row=1 + len(pg_v))
+    bar.add_data(vals, titles_from_data=True); bar.set_categories(cats)
+    bar.legend = None
+    bar.y_axis.numFmt = MFMT; bar.y_axis.majorGridlines = None
+    value_labels(bar)
+    _point_colors(bar.series[0], ["8FAADC", "5B9BD5", "2E75B6", "2E5496", "1F3864"])
+    ws.add_chart(bar, "I9")
 
-    summary_data = []
-    buckets_list = [">365", "181-365", "91-180", "31-90", "0-30"]
-    clients = df_data['Shipper'].dropna().unique()
+    # 3) Ageing column (green -> red)
+    age = BarChart(); age.type = "col"
+    style_chart(age, "Ageing Profile by Value (THB M)")
+    cats = Reference(cd, min_col=7, min_row=2, max_row=1 + len(bucket_v))
+    vals = Reference(cd, min_col=8, min_row=1, max_row=1 + len(bucket_v))
+    age.add_data(vals, titles_from_data=True); age.set_categories(cats)
+    age.legend = None
+    age.y_axis.numFmt = MFMT; age.y_axis.majorGridlines = None
+    value_labels(age)
+    _point_colors(age.series[0], ["70AD47", "A9D18E", "FFD966", "F4B183", "C00000"])
+    ws.add_chart(age, "B24")
 
-    for client in clients:
-        row_data = {'Client': client}
-        total_qty = total_val = 0
-        for b in buckets_list:
-            try:
-                qty = pivot_df.loc[client, ('Unrestricted', b)]
-                val = pivot_df.loc[client, ('Value Unrestricted', b)]
-            except KeyError:
-                qty = val = 0
-            
-            b_total = bucket_totals.get(b, 0)
-            pct = (val / b_total) * 100 if b_total > 0 else 0
-            
-            row_data[f'Quantity {b}'] = qty
-            row_data[f'Stock Value THB. {b}'] = val
-            row_data[f'% {b}'] = f"{pct:.2f}%" 
-            
-            total_qty += qty
-            total_val += val
-            
-        row_data['Total Quantity'] = total_qty
-        row_data['Total Stock Value THB.'] = total_val
-        summary_data.append(row_data)
-    df_summary = pd.DataFrame(summary_data)
+    # 4) Top 10 clients (horizontal)
+    h1 = BarChart(); h1.type = "bar"
+    style_chart(h1, "Top 10 Clients by Value (THB M)", h=8.2, w=12.0)
+    cats = Reference(cd, min_col=10, min_row=2, max_row=1 + len(top_clients))
+    vals = Reference(cd, min_col=11, min_row=1, max_row=1 + len(top_clients))
+    h1.add_data(vals, titles_from_data=True); h1.set_categories(cats)
+    h1.legend = None
+    h1.x_axis.numFmt = MFMT; h1.x_axis.majorGridlines = None
+    value_labels(h1)
+    _series_color(h1.series[0], "2E5496")
+    ws.add_chart(h1, "I24")
 
-    print("\n--- เริ่มต้นขั้นตอนที่ 5: การสร้าง Dashboard สรุปผล 5 ตาราง (PV DATA) ---")
-    
-    def make_client_table(df, denominator):
-        if df.empty:
-            return pd.DataFrame({'No.': [''], 'Client': ['Grand Total'], 'Quantity': [0], 'Stock Value THB.': [0], '%': ['0.00%']})
-        grouped = df.groupby('Shipper')[['Unrestricted', 'Value Unrestricted']].sum().reset_index()
-        grouped.rename(columns={'Shipper': 'Client', 'Unrestricted': 'Quantity', 'Value Unrestricted': 'Stock Value THB.'}, inplace=True)
-        
-        grouped['%_num'] = (grouped['Stock Value THB.'] / denominator * 100) if denominator else 0
-        grouped = grouped.sort_values(by='Stock Value THB.', ascending=False).reset_index(drop=True)
-        grouped.insert(0, 'No.', range(1, len(grouped) + 1))
-        
-        total_val = grouped['Stock Value THB.'].sum()
-        sum_pct = (total_val / denominator * 100) if denominator else 0
-        
-        grouped['%'] = grouped['%_num'].apply(lambda x: f"{x:.2f}%")
-        grouped.drop(columns=['%_num'], inplace=True)
-        
-        gt_row = pd.DataFrame({
-            'No.': [''],
-            'Client': ['Grand Total'], 
-            'Quantity': [grouped['Quantity'].sum()],
-            'Stock Value THB.': [total_val], 
-            '%': [f"{sum_pct:.2f}%"]
-        })
-        return pd.concat([grouped, gt_row], ignore_index=True)
+    # 5) Top 10 dead-stock clients (horizontal, red)
+    h2 = BarChart(); h2.type = "bar"
+    style_chart(h2, "Top 10 Dead-Stock Clients (>365, THB M)", h=8.2, w=12.0)
+    cats = Reference(cd, min_col=13, min_row=2, max_row=1 + len(dead_clients))
+    vals = Reference(cd, min_col=14, min_row=1, max_row=1 + len(dead_clients))
+    h2.add_data(vals, titles_from_data=True); h2.set_categories(cats)
+    h2.legend = None
+    h2.x_axis.numFmt = MFMT; h2.x_axis.majorGridlines = None
+    value_labels(h2)
+    _series_color(h2.series[0], "C00000")
+    ws.add_chart(h2, "B40")
 
-    df_inv_all = make_client_table(df_data, grand_total_value)
-    total_365_val = bucket_totals.get('>365', 0)
-    df_inv_365 = make_client_table(df_data[df_data['Bucket'] == '>365'], total_365_val)
+    # ---- page setup: one-page-wide landscape ----
+    ws.page_setup.orientation = "landscape"
+    ws.page_setup.fitToWidth = 1
+    ws.page_setup.fitToHeight = 0
+    ws.sheet_properties.pageSetUpPr = PageSetupProperties(fitToPage=True)
+    ws.print_area = "A1:P58"
+    ws.sheet_view.zoomScale = 90
+    return ws
 
-    def make_group_report(df, group_col):
-        rows = []
-        for p in ['TH40', 'TH44']:
-            p_data = df[df['Plant'] == p]
-            if p_data.empty: continue
-            
-            p_qty, p_val = p_data['Unrestricted'].sum(), p_data['Value Unrestricted'].sum()
-            p_pct = (p_val / grand_total_value) * 100 if grand_total_value else 0
-            rows.append({'Category': p, 'Quantity': p_qty, 'Stock Value THB.': p_val, '%': f"{p_pct:.2f}%"})
-            
-            sub_groups = ["0-30", "31-90", "91-180", "181-365", ">365"] if group_col == 'Bucket' else sorted(p_data[group_col].dropna().unique())
-            for sg in sub_groups:
-                sg_data = p_data[p_data[group_col] == sg]
-                if sg_data.empty: continue
-                sg_qty, sg_val = sg_data['Unrestricted'].sum(), sg_data['Value Unrestricted'].sum()
-                
-                if group_col == 'Bucket':
-                    denominator = bucket_totals.get(sg, 0)
-                else:
-                    denominator = grand_total_value
-                    
-                sg_pct = (sg_val / denominator) * 100 if denominator > 0 else 0
-                rows.append({'Category': f"   {sg}", 'Quantity': sg_qty, 'Stock Value THB.': sg_val, '%': f"{sg_pct:.2f}%"})
-                
-        gt_pct = (df['Value Unrestricted'].sum() / grand_total_value) * 100 if grand_total_value else 0
-        rows.append({
-            'Category': 'Grand Total', 'Quantity': df['Unrestricted'].sum(),
-            'Stock Value THB.': df['Value Unrestricted'].sum(), 
-            '%': f"{gt_pct:.2f}%"
-        })
-        return pd.DataFrame(rows)
 
-    df_pg_report = make_group_report(df_data, 'Product Group').rename(columns={'Category': 'Plant / Product Group'})
-    df_ageing_report = make_group_report(df_data, 'Bucket').rename(columns={'Category': 'Plant / Ageing'})
+# ----------------------------------------------------------------------------
+# Plain data sheets
+# ----------------------------------------------------------------------------
+def write_table(ws, df, *, date_cols=()):
+    df = df.copy()
+    for dc in date_cols:
+        if dc in df.columns:
+            df[dc] = pd.to_datetime(df[dc], errors="coerce")
+    two_dec = {"Unrestricted", "Value Unrestricted", "Stock value", "Value Unrestricted "}
+    for j, col in enumerate(df.columns, start=1):
+        c = ws.cell(row=1, column=j, value=str(col))
+        style_cell(c, bold=True, color=WHITE, fill=CLR_DARK, align="center")
+    for i, (_, row) in enumerate(df.iterrows(), start=2):
+        for j, col in enumerate(df.columns, start=1):
+            v = row[col]
+            cell = ws.cell(row=i, column=j)
+            if isinstance(v, pd.Timestamp):
+                cell.value = None if pd.isna(v) else v.to_pydatetime()
+                if cell.value is not None:
+                    cell.number_format = "yyyy-mm-dd"
+            else:
+                if pd.isna(v):
+                    v = None
+                elif isinstance(v, np.integer):
+                    v = int(v)
+                elif isinstance(v, np.floating):
+                    v = float(v)
+                cell.value = v
+                if col in two_dec and isinstance(v, (int, float)):
+                    cell.number_format = NUM2
+            cell.font = Font(name=FONT, size=9)
+    for j, col in enumerate(df.columns, start=1):
+        ws.column_dimensions[get_column_letter(j)].width = max(12, min(30, len(str(col)) + 4))
+    ws.freeze_panes = "A2"
 
-    def make_plant_table(df):
-        grouped = df.groupby('Plant')[['Unrestricted', 'Value Unrestricted']].sum().reset_index()
-        grouped.rename(columns={'Unrestricted': 'Quantity', 'Value Unrestricted': 'Stock Value THB.'}, inplace=True)
-        
-        grouped['%_num'] = (grouped['Stock Value THB.'] / grand_total_value * 100) if grand_total_value else 0
-        total_val = grouped['Stock Value THB.'].sum()
-        sum_pct = (total_val / grand_total_value * 100) if grand_total_value else 0
-        
-        grouped['%'] = grouped['%_num'].apply(lambda x: f"{x:.2f}%")
-        grouped.drop(columns=['%_num'], inplace=True)
-        
-        gt_row = pd.DataFrame({'Plant': ['Grand Total'], 'Quantity': [grouped['Quantity'].sum()],
-                               'Stock Value THB.': [total_val], '%': [f"{sum_pct:.2f}%"]})
-        return pd.concat([grouped, gt_row], ignore_index=True)
 
-    df_plant_report = make_plant_table(df_data)
-
-    dash_layouts = [
-        (df_plant_report, "Plant Report", 5, 1),
-        (df_pg_report, "Product Group Report", 5 + len(df_plant_report) + 3, 1),
-        (df_ageing_report, "Ageing Report", 5 + len(df_plant_report) + 3 + len(df_pg_report) + 3, 1),
-        (df_inv_all, "Inventory Clients (THB)", 5, 6),
-        (df_inv_365, "Inventory Clients (THB) (>365)", 5, 12)
-    ]
-
-    print("\n--- กำลังบันทึกและจัดรูปแบบเอกสารขั้นสุดท้าย (ปรับฟอนต์และตัวเลข) ---")
+def main():
     os.makedirs(OUTPUT_DIR, exist_ok=True)
-    output_path = os.path.join(OUTPUT_DIR, "Result_Report.xlsx")
+    print("Building DATA ...")
+    data, data_out = build_data()
 
-    FONT_NAME = "Segoe UI"
-    
-    header_fill = PatternFill(start_color="D9D9D9", end_color="D9D9D9", fill_type="solid")
-    total_fill = PatternFill(start_color="D9E1F2", end_color="D9E1F2", fill_type="solid") 
-    top10_fill = PatternFill(start_color="FFF2CC", end_color="FFF2CC", fill_type="solid") 
-    
-    thin_border = Border(left=Side(style='thin'), right=Side(style='thin'), top=Side(style='thin'), bottom=Side(style='thin'))
-    
-    header_font = Font(name=FONT_NAME, bold=True)
-    total_font = Font(name=FONT_NAME, bold=True, color="000000")
-    data_font = Font(name=FONT_NAME)
+    n_nogr = int(data["Bucket"].isna().sum())
+    n_unassigned = int((data["Product Group"] == "UNASSIGNED GROUP").sum())
+    print(f"  rows: {len(data):,} | No-GR rows: {n_nogr} | Unassigned-Group rows: {n_unassigned}")
+    print(f"  grand qty: {data['Unrestricted'].sum():,.3f} | grand value: {data['Value Unrestricted'].sum():,.2f}")
 
-    with pd.ExcelWriter(output_path, engine='openpyxl') as writer:
-        dash_sheet_name = 'PV DATA (Dashboard)'
-        pd.DataFrame().to_excel(writer, sheet_name=dash_sheet_name, index=False)
-        ws = writer.sheets[dash_sheet_name]
-        
-        pct_365 = round((total_365_val / grand_total_value * 100), 2) if grand_total_value else 0
-        top_client_365 = df_inv_365.iloc[0]['Client'] if len(df_inv_365) > 1 else "N/A"
-        
-        summary_text = (
-            f"Executive Summary: Total Inventory Value is {grand_total_value:,.2f} THB. "
-            f"Dead Stock (>365 Days) accounts for {total_365_val:,.2f} THB ({pct_365}% of total inventory). "
-            f"The primary client driver for dead stock is '{top_client_365}'."
-        )
-        ws.merge_cells("B2:P4")
-        summary_cell = ws["B2"]
-        summary_cell.value = summary_text
-        summary_cell.font = Font(name=FONT_NAME, bold=True, color="002060", size=11)
-        summary_cell.fill = PatternFill(start_color="E2EFDA", end_color="E2EFDA", fill_type="solid")
-        summary_cell.alignment = Alignment(wrap_text=True, vertical="center", horizontal="left")
-        
-        for t_df, title, r, c in dash_layouts:
-            t_df.to_excel(writer, sheet_name=dash_sheet_name, startrow=r, startcol=c, index=False)
-            
-            cell = ws.cell(row=r, column=c+1, value=title)
-            cell.font = Font(name=FONT_NAME, bold=True, color="000080", size=12)
-            
-            for col_num in range(c + 1, c + 1 + len(t_df.columns)):
-                header_cell = ws.cell(row=r+1, column=col_num)
-                header_cell.fill = header_fill
-                header_cell.font = header_font
-                header_cell.border = thin_border
-                
-            for row_num in range(r + 2, r + 2 + len(t_df)):
-                val_col1 = str(ws.cell(row=row_num, column=c+1).value)
-                val_col2 = str(ws.cell(row=row_num, column=c+2).value)
-                is_total_row = (val_col1 in ["Grand Total", "TH40", "TH44"]) or (val_col2 in ["Grand Total"])
-                
-                is_client_table = "Clients" in title
-                is_top_10 = is_client_table and (row_num < r + 2 + 10) and not is_total_row
+    wb = Workbook()
+    # remove default sheet; exec dashboard inserted at index 0
+    default_ws = wb.active
+    build_executive_dashboard(wb, data)
+    wb.remove(default_ws)
 
-                for col_num in range(c + 1, c + 1 + len(t_df.columns)):
-                    data_cell = ws.cell(row=row_num, column=col_num)
-                    data_cell.border = thin_border
-                    data_cell.font = data_font
-                    
-                    if is_total_row:
-                        data_cell.fill = total_fill
-                        data_cell.font = total_font
-                    elif is_top_10:
-                        data_cell.fill = top10_fill
-                        
-                    header_val = str(ws.cell(row=r+1, column=col_num).value)
-                    if isinstance(data_cell.value, (int, float)):
-                        if "Stock Value" in header_val or "Value" in header_val:
-                            data_cell.number_format = '#,##0.00'
-                        elif "Quantity" in header_val or "Unrestricted" in header_val:
-                            data_cell.number_format = '#,##0'
+    build_tables_dashboard(wb.create_sheet("PV DATA (Dashboard)"), data)
+    write_table(wb.create_sheet("DATA"), data_out, date_cols=["GR Date"])
+    dead = data_out[data_out["Bucket"] == ">365"].copy()
+    write_table(wb.create_sheet("Ageing > 365 D"), dead, date_cols=["GR Date"])
 
-        df_data.to_excel(writer, sheet_name='DATA', index=False)
-        df_summary.to_excel(writer, sheet_name='Ageing > 365 D', index=False)
-        
-        mb52_th40.to_excel(writer, sheet_name='MB52_TH40', index=False)
-        mb52_th44.to_excel(writer, sheet_name='MB52_TH44', index=False)
-        r138_th40.to_excel(writer, sheet_name='R138_TH40', index=False)
-        r138_th44.to_excel(writer, sheet_name='R138_TH44', index=False)
-        product_group.to_excel(writer, sheet_name='Product Group', index=False)
+    mb40, mb44, r40, r44, pg = load_inputs()
+    for name, df in [("MB52_TH40", mb40), ("MB52_TH44", mb44),
+                     ("R138_TH40", r40), ("R138_TH44", r44), ("Product Group", pg)]:
+        write_table(wb.create_sheet(name), df,
+                    date_cols=[c for c in ("Last GR", "Expiry date") if c in df.columns])
 
-        for sheet_name in writer.sheets:
-            target_ws = writer.sheets[sheet_name]
-            
-            if sheet_name != dash_sheet_name:
-                col_formats = {}
-                for col_num in range(1, target_ws.max_column + 1):
-                    h_cell = target_ws.cell(row=1, column=col_num)
-                    h_cell.fill = header_fill
-                    h_cell.font = header_font
-                    h_cell.border = thin_border
-                    
-                    h_val = str(h_cell.value)
-                    if "Stock Value" in h_val or "Value" in h_val:
-                        col_formats[col_num] = '#,##0.00'
-                    elif "Quantity" in h_val or "Unrestricted" in h_val:
-                        col_formats[col_num] = '#,##0'
-                
-                for row in target_ws.iter_rows(min_row=2, max_row=target_ws.max_row, min_col=1, max_col=target_ws.max_column):
-                    for cell in row:
-                        cell.border = thin_border
-                        cell.font = data_font
-                        if cell.column in col_formats and isinstance(cell.value, (int, float)):
-                            cell.number_format = col_formats[cell.column]
+    out_path = os.path.join(OUTPUT_DIR, OUTPUT_NAME)
+    wb.save(out_path)
+    print(f"Saved -> {out_path}")
+    return out_path
 
-            for col in target_ws.columns:
-                max_len = 0
-                col_letter = get_column_letter(col[0].column)
-                for cell in col:
-                    if cell.value is not None:
-                        if sheet_name == dash_sheet_name and cell.row < 5:
-                            continue
-                        max_len = max(max_len, len(str(cell.value)))
-                
-                target_ws.column_dimensions[col_letter].width = min(max(max_len + 2, 10), 45)
 
-    print(f"\n[สำเร็จ] ประมวลผลแบบ Multi-Level VLOOKUP เสร็จสมบูรณ์ 100%!")
-    print(f"-> ไฟล์รายงานพร้อมใช้งานถูกสร้างขึ้นแล้วที่: {output_path}")
-
-except Exception as e:
-    print("\n" + "="*60)
-    print("❌ ระบบพบข้อผิดพลาด (ERROR) ไม่สามารถประมวลผลต่อได้ ❌")
-    print("รายละเอียด:")
-    print(e)
-    print("="*60 + "\n")
-finally:
-    input("\nกด Enter เพื่อปิดหน้าต่างนี้...")
+if __name__ == "__main__":
+    main()
