@@ -11,7 +11,7 @@ INPUT_DIR = r"/Users/phachon/Documents/DKSH/auto-stock-report/input"
 OUTPUT_DIR = r"/Users/phachon/Documents/DKSH/auto-stock-report/output"
 
 try:
-    print("--- เริ่มต้นขั้นตอนที่ 1: โหลดไฟล์อัจฉริยะและสร้างคีย์อ้างอิง ---")
+    print("--- เริ่มต้นขั้นตอนที่ 1: โหลดไฟล์อัจฉริยะและทำความสะอาดข้อมูล ---")
 
     def smart_load_file(folder, base_name):
         for file_name in os.listdir(folder):
@@ -22,7 +22,7 @@ try:
                     return pd.read_csv(full_path, dtype=str)
                 elif file_name.lower().endswith(('.xlsx', '.xls')):
                     print(f"-> กำลังอ่านไฟล์ Excel: {file_name}")
-                    return pd.read_excel(full_path)
+                    return pd.read_excel(full_path, dtype=str)
         raise FileNotFoundError(f"ไม่พบไฟล์ที่ขึ้นต้นด้วย '{base_name}' ในโฟลเดอร์ {folder}")
 
     mb52_th40 = smart_load_file(INPUT_DIR, "MB52_TH40")
@@ -32,65 +32,72 @@ try:
     product_group = smart_load_file(INPUT_DIR, "Product Group")
 
     for df in [mb52_th40, mb52_th44]:
-        df['Unrestricted'] = pd.to_numeric(df['Unrestricted'], errors='coerce')
-        df['Value Unrestricted'] = pd.to_numeric(df['Value Unrestricted'], errors='coerce')
+        df['Unrestricted'] = pd.to_numeric(df['Unrestricted'].astype(str).str.replace(',', ''), errors='coerce')
+        df['Value Unrestricted'] = pd.to_numeric(df['Value Unrestricted'].astype(str).str.replace(',', ''), errors='coerce')
 
-    # [ส่วนที่ปรับแก้เพิ่ม] ลบแถวที่ Unrestricted เป็น 0 ออกจากตาราง MB52
-    mb52_th40 = mb52_th40[mb52_th40['Unrestricted'] != 0].copy()
-    mb52_th44 = mb52_th44[mb52_th44['Unrestricted'] != 0].copy()
+    mb52_th40 = mb52_th40[(mb52_th40['Unrestricted'] != 0) & (mb52_th40['Unrestricted'].notna())].copy()
+    mb52_th44 = mb52_th44[(mb52_th44['Unrestricted'] != 0) & (mb52_th44['Unrestricted'].notna())].copy()
 
-    def clean_key_col(series):
+    def clean_col(series):
         s = series.fillna('').astype(str).str.strip().str.upper()
+        s = s.str.replace(',', '', regex=False)
         s = s.str.replace(r'\.0$', '', regex=True)
         s = s.replace('NAN', '')
         return s
 
-    if 'Last GR' in r138_th40.columns:
-        r138_th40['Last GR'] = pd.to_datetime(r138_th40['Last GR'], errors='coerce').dt.strftime('%Y-%m-%d')
-    if 'Last GR' in r138_th44.columns:
-        r138_th44['Last GR'] = pd.to_datetime(r138_th44['Last GR'], errors='coerce').dt.strftime('%Y-%m-%d')
+    r138_all = pd.concat([r138_th40, r138_th44], ignore_index=True)
+    r138_all['Last GR'] = pd.to_datetime(r138_all['Last GR'], errors='coerce')
+    r138_all = r138_all.sort_values('Last GR', na_position='last') # เรียงเอาวันที่เก่าสุดขึ้นก่อน
 
-    mb52_th40['Link_Key'] = clean_key_col(mb52_th40['Material']) + clean_key_col(mb52_th40['Unrestricted']) + clean_key_col(mb52_th40['Batch'])
-    mb52_th44['Link_Key'] = clean_key_col(mb52_th44['Material']) + clean_key_col(mb52_th44['Unrestricted']) + clean_key_col(mb52_th44['Batch'])
+    print("\n--- เริ่มต้นขั้นตอนที่ 2: จำลองระบบ VLOOKUP เสมือนมนุษย์ (Multi-Level Mapping) ---")
     
-    r138_th40['Link_Key'] = clean_key_col(r138_th40['Material No.']) + clean_key_col(r138_th40['Quantity']) + clean_key_col(r138_th40['Batch no.'])
-    r138_th44['Link_Key'] = clean_key_col(r138_th44['Material No.']) + clean_key_col(r138_th44['Quantity']) + clean_key_col(r138_th44['Batch no.'])
+    # ---------------------------------------------------------
+    # สร้าง Dictionaries สำหรับการแมป (Mapping) แบบหลายชั้น
+    # ---------------------------------------------------------
+    # 1. Dict สำหรับ GR Date (4 ชั้น)
+    dict_gr_full = dict(zip(clean_col(r138_all['Material No.']) + "_" + clean_col(r138_all['Quantity']) + "_" + clean_col(r138_all['Batch no.']), r138_all['Last GR']))
+    dict_gr_mb = dict(zip(clean_col(r138_all['Material No.']) + "_" + clean_col(r138_all['Batch no.']), r138_all['Last GR']))
+    dict_gr_m = dict(zip(clean_col(r138_all['Material No.']), r138_all['Last GR']))
 
-    print("\n--- เริ่มต้นขั้นตอนที่ 2: รวมตารางและทำ Conditional Lookup ---")
+    # 2. Dict สำหรับ Product Group (3 ชั้น)
+    dict_pg_1 = dict(zip(clean_col(product_group['Material']), product_group['Product Group']))
+    dict_pg_2 = dict(zip(clean_col(r138_all['Material No.']), r138_all['Level 4 Product Group']))
+    dict_pg_3 = dict(zip(clean_col(r138_all['Material Group']), r138_all['Level 4 Product Group']))
+
+    # 3. Dict สำหรับ Shipper
+    dict_shipper = dict(zip(clean_col(r138_all['Material Group']), r138_all['Material Group Desc']))
+
+    # 4. Dict สำหรับ Profit Center
+    dict_pc = dict(zip(clean_col(r138_all['Plant']) + "_" + clean_col(r138_all['Material No.']), r138_all['Profit center']))
+
+    # ---------------------------------------------------------
+    # นำตาราง MB52 มารวมกันและยิง VLOOKUP แบบลึกล้ำ
+    # ---------------------------------------------------------
     df_data = pd.concat([mb52_th40, mb52_th44], ignore_index=True)
-
     df_data = df_data.dropna(subset=['Material', 'Plant'])
     df_data = df_data[df_data['Plant'].isin(['TH40', 'TH44'])].copy()
 
-    if 'Material Description' in df_data.columns:
-        df_data = df_data.drop(columns=['Material Description'])
+    k_full = clean_col(df_data['Material']) + "_" + clean_col(df_data['Unrestricted']) + "_" + clean_col(df_data['Batch'])
+    k_mb = clean_col(df_data['Material']) + "_" + clean_col(df_data['Batch'])
+    k_m = clean_col(df_data['Material'])
+    k_grp = clean_col(df_data['Material Group'])
+    k_plant_mat = clean_col(df_data['Plant']) + "_" + k_m
 
-    df_data['Material_Key'] = clean_key_col(df_data['Material'])
-    df_pg_lookup = product_group[['Material', 'Product Group']].copy()
-    df_pg_lookup['Material_Key'] = clean_key_col(df_pg_lookup['Material'])
-    df_pg_lookup = df_pg_lookup.drop_duplicates(subset=['Material_Key'])
-    
-    df_data = pd.merge(df_data, df_pg_lookup[['Material_Key', 'Product Group']], on='Material_Key', how='left')
-    df_data = df_data.drop(columns=['Material_Key'])
+    # VLOOKUP: GR Date (4 ชั้น ตามที่วินิจฉัย)
+    df_data['GR Date'] = k_full.map(dict_gr_full)
+    df_data['GR Date'] = df_data['GR Date'].fillna(k_mb.map(dict_gr_mb))
+    df_data['GR Date'] = df_data['GR Date'].fillna(k_m.map(dict_gr_m))
+    df_data['GR Date'] = df_data['GR Date'].fillna(pd.to_datetime(df_data['Batch'], format='%Y%m%d', errors='coerce')) # ชั้นที่ 4: ดึงจากชื่อ Batch
 
-    r130_th40_lookup = r138_th40[['Link_Key', 'Material Group Desc', 'Profit center', 'Last GR']].rename(
-        columns={'Material Group Desc': 'Shipper', 'Last GR': 'GR Date'}
-    ).drop_duplicates(subset=['Link_Key'])
+    # VLOOKUP: Product Group (3 ชั้น ตามที่วินิจฉัย)
+    df_data['Product Group'] = k_m.map(dict_pg_1)
+    df_data['Product Group'] = df_data['Product Group'].fillna(k_m.map(dict_pg_2))
+    df_data['Product Group'] = df_data['Product Group'].fillna(k_grp.map(dict_pg_3))
+    df_data['Product Group'] = df_data['Product Group'].fillna('Unassigned Group') # เผื่อเหนียว
 
-    r130_th44_lookup = r138_th44[['Link_Key', 'Material Group Desc', 'Profit center', 'Last GR']].rename(
-        columns={'Material Group Desc': 'Shipper', 'Last GR': 'GR Date'}
-    ).drop_duplicates(subset=['Link_Key'])
-
-    df_th40 = df_data[df_data['Plant'] == 'TH40'].copy()
-    df_th44 = df_data[df_data['Plant'] == 'TH44'].copy()
-
-    df_th40 = pd.merge(df_th40, r130_th40_lookup, on='Link_Key', how='left')
-    df_th44 = pd.merge(df_th44, r130_th44_lookup, on='Link_Key', how='left')
-
-    df_data = pd.concat([df_th40, df_th44], ignore_index=True)
-
-    df_data['Shipper'] = df_data['Shipper'].fillna('Unassigned Shipper')
-    df_data['Product Group'] = df_data['Product Group'].fillna('Unassigned Group')
+    # VLOOKUP: Shipper & Profit Center
+    df_data['Shipper'] = k_grp.map(dict_shipper).fillna('Unassigned Shipper')
+    df_data['Profit center'] = k_plant_mat.map(dict_pc)
 
     columns_order = [
         'Plant', 'Storage location', 'Material', 'Unrestricted', 'Value Unrestricted',
@@ -99,16 +106,17 @@ try:
     ]
     df_data = df_data[columns_order]
 
-    print("\n--- เริ่มต้นขั้นตอนที่ 3: การคำนวณอายุสินทรัพย์ ---")
-    df_data['GR Date'] = pd.to_datetime(df_data['GR Date'], errors='coerce')
+    print("\n--- เริ่มต้นขั้นตอนที่ 3: การคำนวณอายุสินทรัพย์และการจัดกลุ่ม ---")
     current_date = pd.Timestamp.today().normalize()
-    df_data['Ageing'] = (current_date + pd.Timedelta(days=1) - df_data['GR Date']).dt.days
+    # คำนวณ Ageing (หากไม่มี GR Date ท้ายที่สุดจริงๆ จะให้เป็น 0 เพื่อจัดกลุ่ม 0-30 ป้องกัน Error)
+    df_data['GR Date'] = df_data['GR Date'].fillna(current_date)
     
+    df_data['Ageing'] = (current_date + pd.Timedelta(days=1) - df_data['GR Date']).dt.days
     df_data['GR Date'] = df_data['GR Date'].dt.strftime('%Y-%m-%d')
 
     bins = [-np.inf, 30, 90, 180, 365, np.inf]
     labels = ["0-30", "31-90", "91-180", "181-365", ">365"]
-    df_data['Bucket'] = pd.cut(df_data['Ageing'], bins=bins, labels=labels)
+    df_data['Bucket'] = pd.cut(df_data['Ageing'], bins=bins, labels=labels).astype(str)
 
     final_columns_order = [
         'Plant', 'Storage location', 'Material', 'Unrestricted', 'Value Unrestricted',
@@ -364,7 +372,7 @@ try:
                 
                 target_ws.column_dimensions[col_letter].width = min(max(max_len + 2, 10), 45)
 
-    print(f"\n[สำเร็จ] ประมวลผล ใส่จุลภาค (Comma) และจัดรูปแบบเสร็จสมบูรณ์ 100%!")
+    print(f"\n[สำเร็จ] ประมวลผลแบบ Multi-Level VLOOKUP เสร็จสมบูรณ์ 100%!")
     print(f"-> ไฟล์รายงานพร้อมใช้งานถูกสร้างขึ้นแล้วที่: {output_path}")
 
 except Exception as e:
