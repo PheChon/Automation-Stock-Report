@@ -7,8 +7,8 @@ from openpyxl.styles import Font, PatternFill, Border, Side, Alignment
 # ==========================================
 # ⚠️ กำหนดตำแหน่ง Path โฟลเดอร์ของ Windows
 # ==========================================
-INPUT_DIR = r"C:\Users\thiraphop.chantra\Downloads\Auto-report\input"
-OUTPUT_DIR = r"C:\Users\thiraphop.chantra\Downloads\Auto-report\output"
+INPUT_DIR = r"/Users/phachon/Documents/DKSH/auto-stock-report/input"
+OUTPUT_DIR = r"/Users/phachon/Documents/DKSH/auto-stock-report/output"
 
 try:
     print("--- เริ่มต้นขั้นตอนที่ 1: โหลดไฟล์อัจฉริยะและสร้างคีย์อ้างอิง ---")
