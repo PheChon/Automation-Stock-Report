@@ -35,6 +35,10 @@ try:
         df['Unrestricted'] = pd.to_numeric(df['Unrestricted'], errors='coerce')
         df['Value Unrestricted'] = pd.to_numeric(df['Value Unrestricted'], errors='coerce')
 
+    # [ส่วนที่ปรับแก้เพิ่ม] ลบแถวที่ Unrestricted เป็น 0 ออกจากตาราง MB52
+    mb52_th40 = mb52_th40[mb52_th40['Unrestricted'] != 0].copy()
+    mb52_th44 = mb52_th44[mb52_th44['Unrestricted'] != 0].copy()
+
     def clean_key_col(series):
         s = series.fillna('').astype(str).str.strip().str.upper()
         s = s.str.replace(r'\.0$', '', regex=True)
@@ -246,7 +250,6 @@ try:
     os.makedirs(OUTPUT_DIR, exist_ok=True)
     output_path = os.path.join(OUTPUT_DIR, "Result_Report.xlsx")
 
-    # [การตั้งค่า Font] 
     FONT_NAME = "Segoe UI"
     
     header_fill = PatternFill(start_color="D9D9D9", end_color="D9D9D9", fill_type="solid")
