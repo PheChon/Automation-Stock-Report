@@ -400,7 +400,7 @@ def build_executive_dashboard(wb, data):
     pg_src = data.copy()
     pg_src["PGdisp"] = pg_src["Product Group"].replace("SERVICES", "SERVICE")
     pg_v = (pg_src.groupby("PGdisp")["Value Unrestricted"].sum()
-                  .reindex(PG_ORDER).dropna())
+                  .sort_values(ascending=False))   # sort by value, high -> low
     bucket_v = (data.groupby("Bucket", observed=False)["Value Unrestricted"].sum()
                     .reindex(BUCKET_LABELS).fillna(0))
     top_clients = (data.groupby("Shipper")["Value Unrestricted"].sum()
@@ -502,7 +502,7 @@ def build_executive_dashboard(wb, data):
     show_axes(bar)
     bar.y_axis.numFmt = MFMT; bar.y_axis.majorGridlines = None
     value_labels(bar)
-    _point_colors(bar.series[0], ["8FAADC", "5B9BD5", "2E75B6", "2E5496", "1F3864"])
+    _point_colors(bar.series[0], ["1F3864", "2E5496", "2E75B6", "5B9BD5", "8FAADC"][:len(pg_v)])
     ws.add_chart(bar, "I9")
 
     # 3) Ageing column (green -> red)
@@ -529,7 +529,7 @@ def build_executive_dashboard(wb, data):
     h1.x_axis.numFmt = MFMT; h1.x_axis.majorGridlines = None
     value_labels(h1)
     _series_color(h1.series[0], "2E5496")
-    ws.add_chart(h1, "I29")
+    ws.add_chart(h1, "B52")
 
     # 5) Top 10 dead-stock clients (horizontal, red)
     h2 = BarChart(); h2.type = "bar"
@@ -542,7 +542,7 @@ def build_executive_dashboard(wb, data):
     h2.x_axis.numFmt = MFMT; h2.x_axis.majorGridlines = None
     value_labels(h2)
     _series_color(h2.series[0], "C00000")
-    ws.add_chart(h2, "B52")
+    ws.add_chart(h2, "I29")
 
     # ---- page setup: one-page-wide landscape ----
     ws.page_setup.orientation = "landscape"
