@@ -195,7 +195,7 @@ def build_data():
     data["Shipper"] = data["Shipper"].fillna("Unassigned Shipper")
 
     today = pd.Timestamp.today().normalize()
-    data["Ageing"] = (today + pd.Timedelta(days=1) - data["GR Date"]).dt.days
+    data["Ageing"] = (today - data["GR Date"]).dt.days
     data["Bucket"] = pd.cut(data["Ageing"], bins=BUCKET_BINS, labels=BUCKET_LABELS)
 
     out_cols = ["Plant", "Storage location", "Material", "Unrestricted",
