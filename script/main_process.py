@@ -61,9 +61,10 @@ FILES = {
 
 BUCKET_BINS   = [-np.inf, 30, 90, 180, 365, np.inf]
 BUCKET_LABELS = ["0-30", "31-90", "91-180", "181-365", ">365"]
-# Display order. SERVICE comes from the Product Group file; SERVICES from R138
-# 'Level 4 Product Group' (kept separate, exactly as the manual report shows them).
-PG_ORDER      = ["ACCESSORIES", "CONSUMABLES", "EQUIPMENT", "SERVICE", "SERVICES", "SPARE PARTS"]
+# Display order for the dashboard tables/charts. On the dashboard, R138's
+# 'SERVICES' is merged into 'SERVICE' (per request). The raw DATA sheet keeps
+# them separate, exactly as the manual report does.
+PG_ORDER      = ["ACCESSORIES", "CONSUMABLES", "EQUIPMENT", "SERVICE", "SPARE PARTS"]
 
 # ----------------------------------------------------------------------------
 # Helpers
@@ -189,6 +190,7 @@ CLR_DARK  = "1F3864"   # navy header
 CLR_MED   = "2E5496"   # section title
 CLR_SUB   = "D9E1F2"   # subtotal row
 CLR_GRAND = "FCE4D6"   # grand-total row
+CLR_HL    = "FFF2CC"   # highlight for top-ranked clients (light gold)
 WHITE     = "FFFFFF"
 CLR_RED   = "C00000"
 CLR_GREEN = "548235"
@@ -289,10 +291,12 @@ def build_tables_dashboard(ws, data):
     col_headers(12, "Plant / Product Group")
     r = 13
     for p in ["TH40", "TH44"]:
-        sub = data[data["Plant"] == p]
+        sub = data[data["Plant"] == p].copy()
+        # On the PV dashboard, merge 'SERVICES' into 'SERVICE' (display only).
+        sub["PGdisp"] = sub["Product Group"].replace("SERVICES", "SERVICE")
         data_row(r, p, sub["Unrestricted"].sum(), sub["Value Unrestricted"].sum(),
                  fill=CLR_SUB, bold=True); r += 1
-        g = sub.groupby("Product Group")[["Unrestricted", "Value Unrestricted"]].sum()
+        g = sub.groupby("PGdisp")[["Unrestricted", "Value Unrestricted"]].sum()
         present = [x for x in PG_ORDER if x in g.index] + [x for x in g.index if x not in PG_ORDER]
         for grp in present:
             data_row(r, grp, g.loc[grp, "Unrestricted"], g.loc[grp, "Value Unrestricted"],
@@ -317,8 +321,8 @@ def build_tables_dashboard(ws, data):
             data_row(r, bk, q, v, indent=True); r += 1
     data_row(r, "Grand Total", grand_q, grand_v, fill=CLR_GRAND, bold=True)
 
-    # 4) + 5) Client tables
-    def client_block(start_col, title_text, only_dead):
+    # 4) + 5) Client tables  (highlight top-N rows + Grand Total)
+    def client_block(start_col, title_text, only_dead, highlight_top):
         cols = [get_column_letter(start_col + i) for i in range(5)]
         rng = f"{cols[0]}5:{cols[4]}5"
         merge_band(ws, rng, title_text, fill=CLR_MED)
@@ -331,16 +335,23 @@ def build_tables_dashboard(ws, data):
                .sort_values("Value Unrestricted", ascending=False))
         rr = 7
         for i, (client, rowv) in enumerate(g.iterrows(), start=1):
-            style_cell(ws[f"{cols[0]}{rr}"], align="center"); ws[f"{cols[0]}{rr}"] = i
-            style_cell(ws[f"{cols[1]}{rr}"], align="left");   ws[f"{cols[1]}{rr}"] = client
-            style_cell(ws[f"{cols[2]}{rr}"], align="right", numfmt=NUM2); ws[f"{cols[2]}{rr}"] = rowv["Unrestricted"]
-            style_cell(ws[f"{cols[3]}{rr}"], align="right", numfmt=NUM2); ws[f"{cols[3]}{rr}"] = rowv["Value Unrestricted"]
-            style_cell(ws[f"{cols[4]}{rr}"], align="right", numfmt=PCT)
+            hl = CLR_HL if i <= highlight_top else None
+            style_cell(ws[f"{cols[0]}{rr}"], align="center", fill=hl); ws[f"{cols[0]}{rr}"] = i
+            style_cell(ws[f"{cols[1]}{rr}"], align="left", fill=hl);   ws[f"{cols[1]}{rr}"] = client
+            style_cell(ws[f"{cols[2]}{rr}"], align="right", numfmt=NUM2, fill=hl); ws[f"{cols[2]}{rr}"] = rowv["Unrestricted"]
+            style_cell(ws[f"{cols[3]}{rr}"], align="right", numfmt=NUM2, fill=hl); ws[f"{cols[3]}{rr}"] = rowv["Value Unrestricted"]
+            style_cell(ws[f"{cols[4]}{rr}"], align="right", numfmt=PCT, fill=hl)
             ws[f"{cols[4]}{rr}"] = (rowv["Value Unrestricted"] / denom) if denom else 0
             rr += 1
+        # Grand Total row at the bottom
+        style_cell(ws[f"{cols[0]}{rr}"], fill=CLR_GRAND, bold=True, align="center"); ws[f"{cols[0]}{rr}"] = ""
+        style_cell(ws[f"{cols[1]}{rr}"], fill=CLR_GRAND, bold=True, align="left");   ws[f"{cols[1]}{rr}"] = "Grand Total"
+        style_cell(ws[f"{cols[2]}{rr}"], fill=CLR_GRAND, bold=True, align="right", numfmt=NUM2); ws[f"{cols[2]}{rr}"] = g["Unrestricted"].sum()
+        style_cell(ws[f"{cols[3]}{rr}"], fill=CLR_GRAND, bold=True, align="right", numfmt=NUM2); ws[f"{cols[3]}{rr}"] = g["Value Unrestricted"].sum()
+        style_cell(ws[f"{cols[4]}{rr}"], fill=CLR_GRAND, bold=True, align="right", numfmt=PCT);  ws[f"{cols[4]}{rr}"] = 1.0
 
-    client_block(7,  "Inventory Clients (THB)", False)
-    client_block(13, "Inventory Clients (THB) (>365)", True)
+    client_block(7,  "Inventory Clients (THB)", False, 10)
+    client_block(13, "Inventory Clients (THB) (>365)", True, 5)
 
     # widths (wide enough for titles & names)
     widths = {"A": 2, "B": 26, "C": 16, "D": 20, "E": 10, "F": 2,
@@ -386,8 +397,10 @@ def build_executive_dashboard(wb, data):
 
     # ---- aggregates for charts ----
     plant_v = data.groupby("Plant")["Value Unrestricted"].sum().reindex(["TH40", "TH44"]).fillna(0)
-    pg_v = (data.groupby("Product Group")["Value Unrestricted"].sum()
-                .reindex(PG_ORDER).dropna())
+    pg_src = data.copy()
+    pg_src["PGdisp"] = pg_src["Product Group"].replace("SERVICES", "SERVICE")
+    pg_v = (pg_src.groupby("PGdisp")["Value Unrestricted"].sum()
+                  .reindex(PG_ORDER).dropna())
     bucket_v = (data.groupby("Bucket", observed=False)["Value Unrestricted"].sum()
                     .reindex(BUCKET_LABELS).fillna(0))
     top_clients = (data.groupby("Shipper")["Value Unrestricted"].sum()
