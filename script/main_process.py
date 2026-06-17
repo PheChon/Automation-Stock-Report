@@ -456,11 +456,18 @@ def build_executive_dashboard(wb, data):
     # ---- charts ----
     MFMT = '#,##0.0"M"'   # values already stored in millions -> "149.0M"
 
-    def style_chart(ch, title, h=7.2, w=12.0):
+    def style_chart(ch, title, h=8.0, w=12.0):
         ch.title = title
         ch.height = h
         ch.width = w
         ch.style = 2
+
+    def show_axes(ch):
+        # Force both axes (and their tick labels) to render. Without this,
+        # category labels on horizontal bar charts are hidden by the renderer.
+        for ax in (ch.x_axis, ch.y_axis):
+            ax.delete = False
+            ax.tickLblPos = "nextTo"
 
     def value_labels(ch):
         dl = DataLabelList()
@@ -469,28 +476,30 @@ def build_executive_dashboard(wb, data):
         dl.numFmt = MFMT; dl.sourceLinked = False
         ch.dataLabels = dl
 
-    # 1) Plant pie  (category + percent labels, no legend)
+    # 1) Plant pie  (legend + percent labels; small slice rotated to the bottom)
     pie = PieChart()
-    style_chart(pie, "Inventory Value by Plant", h=7.4, w=11.5)
+    style_chart(pie, "Inventory Value by Plant", h=8.0, w=11.5)
     labels = Reference(cd, min_col=1, min_row=2, max_row=1 + len(plant_v))
     vals   = Reference(cd, min_col=2, min_row=1, max_row=1 + len(plant_v))
     pie.add_data(vals, titles_from_data=True)
     pie.set_categories(labels)
+    pie.firstSliceAng = 200          # push the tiny TH40 slice away from the title
     dl = DataLabelList()
     dl.showCatName = True; dl.showPercent = True; dl.showVal = False
     dl.showSerName = False; dl.showLegendKey = False
     pie.dataLabels = dl
-    pie.legend = None
+    pie.legend.position = "r"        # legend on the right so labels stay light
     _point_colors(pie.series[0], ["5B9BD5", "1F3864"])
     ws.add_chart(pie, "B9")
 
     # 2) Product group column
     bar = BarChart(); bar.type = "col"
-    style_chart(bar, "Inventory Value by Product Group (THB M)")
+    style_chart(bar, "Inventory Value by Product Group (THB M)", h=8.0, w=12.5)
     cats = Reference(cd, min_col=4, min_row=2, max_row=1 + len(pg_v))
     vals = Reference(cd, min_col=5, min_row=1, max_row=1 + len(pg_v))
     bar.add_data(vals, titles_from_data=True); bar.set_categories(cats)
     bar.legend = None
+    show_axes(bar)
     bar.y_axis.numFmt = MFMT; bar.y_axis.majorGridlines = None
     value_labels(bar)
     _point_colors(bar.series[0], ["8FAADC", "5B9BD5", "2E75B6", "2E5496", "1F3864"])
@@ -498,46 +507,49 @@ def build_executive_dashboard(wb, data):
 
     # 3) Ageing column (green -> red)
     age = BarChart(); age.type = "col"
-    style_chart(age, "Ageing Profile by Value (THB M)")
+    style_chart(age, "Ageing Profile by Value (THB M)", h=8.0, w=12.5)
     cats = Reference(cd, min_col=7, min_row=2, max_row=1 + len(bucket_v))
     vals = Reference(cd, min_col=8, min_row=1, max_row=1 + len(bucket_v))
     age.add_data(vals, titles_from_data=True); age.set_categories(cats)
     age.legend = None
+    show_axes(age)
     age.y_axis.numFmt = MFMT; age.y_axis.majorGridlines = None
     value_labels(age)
     _point_colors(age.series[0], ["70AD47", "A9D18E", "FFD966", "F4B183", "C00000"])
-    ws.add_chart(age, "B24")
+    ws.add_chart(age, "B29")
 
-    # 4) Top 10 clients (horizontal)
+    # 4) Top 10 clients (horizontal) -- taller so every client name shows
     h1 = BarChart(); h1.type = "bar"
-    style_chart(h1, "Top 10 Clients by Value (THB M)", h=8.2, w=12.0)
+    style_chart(h1, "Top 10 Clients by Value (THB M)", h=10.5, w=14.0)
     cats = Reference(cd, min_col=10, min_row=2, max_row=1 + len(top_clients))
     vals = Reference(cd, min_col=11, min_row=1, max_row=1 + len(top_clients))
     h1.add_data(vals, titles_from_data=True); h1.set_categories(cats)
     h1.legend = None
+    show_axes(h1)
     h1.x_axis.numFmt = MFMT; h1.x_axis.majorGridlines = None
     value_labels(h1)
     _series_color(h1.series[0], "2E5496")
-    ws.add_chart(h1, "I24")
+    ws.add_chart(h1, "I29")
 
     # 5) Top 10 dead-stock clients (horizontal, red)
     h2 = BarChart(); h2.type = "bar"
-    style_chart(h2, "Top 10 Dead-Stock Clients (>365, THB M)", h=8.2, w=12.0)
+    style_chart(h2, "Top 10 Dead-Stock Clients (>365, THB M)", h=10.5, w=14.0)
     cats = Reference(cd, min_col=13, min_row=2, max_row=1 + len(dead_clients))
     vals = Reference(cd, min_col=14, min_row=1, max_row=1 + len(dead_clients))
     h2.add_data(vals, titles_from_data=True); h2.set_categories(cats)
     h2.legend = None
+    show_axes(h2)
     h2.x_axis.numFmt = MFMT; h2.x_axis.majorGridlines = None
     value_labels(h2)
     _series_color(h2.series[0], "C00000")
-    ws.add_chart(h2, "B40")
+    ws.add_chart(h2, "B52")
 
     # ---- page setup: one-page-wide landscape ----
     ws.page_setup.orientation = "landscape"
     ws.page_setup.fitToWidth = 1
     ws.page_setup.fitToHeight = 0
     ws.sheet_properties.pageSetUpPr = PageSetupProperties(fitToPage=True)
-    ws.print_area = "A1:P58"
+    ws.print_area = "A1:Q74"
     ws.sheet_view.zoomScale = 90
     return ws
 
