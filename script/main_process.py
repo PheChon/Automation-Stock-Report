@@ -400,7 +400,7 @@ def build_executive_dashboard(wb, data):
     pg_src = data.copy()
     pg_src["PGdisp"] = pg_src["Product Group"].replace("SERVICES", "SERVICE")
     pg_v = (pg_src.groupby("PGdisp")["Value Unrestricted"].sum()
-                  .sort_values(ascending=False))   # sort by value, high -> low
+                  .sort_values(ascending=True))    # sort by value, low -> high
     bucket_v = (data.groupby("Bucket", observed=False)["Value Unrestricted"].sum()
                     .reindex(BUCKET_LABELS).fillna(0))
     top_clients = (data.groupby("Shipper")["Value Unrestricted"].sum()
@@ -502,7 +502,7 @@ def build_executive_dashboard(wb, data):
     show_axes(bar)
     bar.y_axis.numFmt = MFMT; bar.y_axis.majorGridlines = None
     value_labels(bar)
-    _point_colors(bar.series[0], ["1F3864", "2E5496", "2E75B6", "5B9BD5", "8FAADC"][:len(pg_v)])
+    _point_colors(bar.series[0], ["8FAADC", "5B9BD5", "2E75B6", "2E5496", "1F3864"][:len(pg_v)])
     ws.add_chart(bar, "I9")
 
     # 3) Ageing column (green -> red)
