@@ -30,6 +30,7 @@ supplement, so the report is fully reproducible each day.
 """
 
 import os
+import sys
 import warnings
 import numpy as np
 import pandas as pd
@@ -81,13 +82,65 @@ def upper_strip(s: pd.Series) -> pd.Series:
     return s.astype(str).str.strip().str.upper()
 
 
+def nice_max(value_millions: float) -> float:
+    """Return a rounded axis maximum ~30% above the largest bar so value
+    labels always have headroom and never collide with the chart title,
+    no matter how large the data grows on future days."""
+    import math
+    t = value_millions * 1.30
+    if t <= 0:
+        return 1
+    if   t > 1000: step = 500
+    elif t > 200:  step = 50
+    elif t > 50:   step = 20
+    elif t > 20:   step = 10
+    elif t > 5:    step = 2
+    else:          step = 1
+    return math.ceil(t / step) * step
+
+
+def _check_files():
+    """Verify all required input files exist; print a clear report. Abort with
+    a friendly message (not a stack trace) if anything is missing."""
+    print("[1/7] Checking input files ...")
+    missing = []
+    for k in ["mb40", "mb44", "r40", "r44", "pg"]:
+        path = os.path.join(INPUT_DIR, FILES[k])
+        if os.path.exists(path):
+            print(f"       [ OK ] {FILES[k]}")
+        else:
+            print(f"       [MISS] {FILES[k]}")
+            missing.append(FILES[k])
+    if missing:
+        print()
+        print("  ERROR: the following input file(s) were not found:")
+        for m in missing:
+            print(f"         - {m}")
+        print(f"  Looked in this folder : {INPUT_DIR}")
+        print("  How to fix:")
+        print("    1) Open the script and check the INPUT_DIR path near the top.")
+        print("    2) Make sure all 5 SAP files are in that folder.")
+        print("    3) Check the file names match EXACTLY (spaces, capital .XLSX).")
+        raise SystemExit(1)
+
+
 def load_inputs():
     p = lambda name: os.path.join(INPUT_DIR, name)
-    mb40 = pd.read_excel(p(FILES["mb40"]))
-    mb44 = pd.read_excel(p(FILES["mb44"]))
-    r40  = pd.read_excel(p(FILES["r40"]))
-    r44  = pd.read_excel(p(FILES["r44"]))
-    pg   = pd.read_excel(p(FILES["pg"]), sheet_name="Product Group")
+    try:
+        mb40 = pd.read_excel(p(FILES["mb40"]))
+        mb44 = pd.read_excel(p(FILES["mb44"]))
+        r40  = pd.read_excel(p(FILES["r40"]))
+        r44  = pd.read_excel(p(FILES["r44"]))
+        pg   = pd.read_excel(p(FILES["pg"]), sheet_name="Product Group")
+    except FileNotFoundError as e:
+        print(f"  ERROR: cannot open a file -> {e}")
+        print(f"  Check that INPUT_DIR is correct: {INPUT_DIR}")
+        raise SystemExit(1)
+    except ValueError as e:
+        # e.g. the 'Product Group' worksheet name is missing/renamed
+        print(f"  ERROR while reading the Product Group file: {e}")
+        print(f"  The file '{FILES['pg']}' must contain a sheet named 'Product Group'.")
+        raise SystemExit(1)
     return mb40, mb44, r40, r44, pg
 
 
@@ -153,6 +206,9 @@ def attach_product_group(data, pg, r_all):
 
 
 def build_data():
+    _check_files()                                   # step 1
+
+    print("[2/7] Reading & cleaning stock data (MB52) ...")
     mb40, mb44, r40, r44, pg = load_inputs()
 
     for df in (mb40, mb44):
@@ -161,18 +217,39 @@ def build_data():
 
     mb40 = mb40[mb40["Unrestricted"] != 0].copy()
     mb44 = mb44[mb44["Unrestricted"] != 0].copy()
+    print(f"       -> {len(mb40) + len(mb44):,} stock rows after removing zero-stock "
+          f"(TH40={len(mb40):,}, TH44={len(mb44):,})")
 
+    print("[3/7] Matching GR date / shipper / profit center (R138) ...")
     m40 = attach_r138(mb40, r40)
     m44 = attach_r138(mb44, r44)
     data = pd.concat([m40, m44], ignore_index=True)
+    n_nogr = int(data["GR Date"].isna().sum())
+    if n_nogr == 0:
+        print("       -> every row matched a GR date")
+    else:
+        print(f"       [!] {n_nogr} row(s) have NO GR date in R138 "
+              f"(they will show with an empty ageing bucket)")
 
+    print("[4/7] Classifying product groups (Product Group file -> R138 Level 4) ...")
     r_all = pd.concat([r40, r44], ignore_index=True)
     data = attach_product_group(data, pg, r_all)
     data["Shipper"] = data["Shipper"].fillna("Unassigned Shipper")
+    n_unassigned = int((data["Product Group"] == "UNASSIGNED GROUP").sum())
+    if n_unassigned == 0:
+        print("       -> every material was classified into a product group")
+    else:
+        print(f"       [!] {n_unassigned} row(s) could not be classified "
+              f"(shown as 'Unassigned Group')")
 
+    print("[5/7] Calculating ageing & buckets ...")
     today = pd.Timestamp.today().normalize()
     data["Ageing"] = (today - data["GR Date"]).dt.days
     data["Bucket"] = pd.cut(data["Ageing"], bins=BUCKET_BINS, labels=BUCKET_LABELS)
+    gv = data["Value Unrestricted"].sum()
+    dead = data[data["Bucket"] == ">365"]["Value Unrestricted"].sum()
+    print(f"       -> total value {gv:,.2f} THB | "
+          f"dead stock (>365) {dead:,.2f} THB ({(dead/gv*100 if gv else 0):.2f}%)")
 
     out_cols = ["Plant", "Storage location", "Material", "Unrestricted",
                 "Value Unrestricted", "Material type", "Material Group",
@@ -501,6 +578,7 @@ def build_executive_dashboard(wb, data):
     bar.legend = None
     show_axes(bar)
     bar.y_axis.numFmt = MFMT; bar.y_axis.majorGridlines = None
+    bar.y_axis.scaling.min = 0; bar.y_axis.scaling.max = nice_max(pg_v.max() / 1e6)
     value_labels(bar)
     _point_colors(bar.series[0], ["8FAADC", "5B9BD5", "2E75B6", "2E5496", "1F3864"][:len(pg_v)])
     ws.add_chart(bar, "I9")
@@ -514,6 +592,7 @@ def build_executive_dashboard(wb, data):
     age.legend = None
     show_axes(age)
     age.y_axis.numFmt = MFMT; age.y_axis.majorGridlines = None
+    age.y_axis.scaling.min = 0; age.y_axis.scaling.max = nice_max(bucket_v.max() / 1e6)
     value_labels(age)
     _point_colors(age.series[0], ["70AD47", "A9D18E", "FFD966", "F4B183", "C00000"])
     ws.add_chart(age, "B29")
@@ -527,6 +606,7 @@ def build_executive_dashboard(wb, data):
     h1.legend = None
     show_axes(h1)
     h1.x_axis.numFmt = MFMT; h1.x_axis.majorGridlines = None
+    h1.x_axis.scaling.min = 0; h1.x_axis.scaling.max = nice_max(top_clients.max() / 1e6)
     value_labels(h1)
     _series_color(h1.series[0], "2E5496")
     ws.add_chart(h1, "B52")
@@ -540,6 +620,7 @@ def build_executive_dashboard(wb, data):
     h2.legend = None
     show_axes(h2)
     h2.x_axis.numFmt = MFMT; h2.x_axis.majorGridlines = None
+    h2.x_axis.scaling.min = 0; h2.x_axis.scaling.max = nice_max(dead_clients.max() / 1e6)
     value_labels(h2)
     _series_color(h2.series[0], "C00000")
     ws.add_chart(h2, "I29")
@@ -591,37 +672,65 @@ def write_table(ws, df, *, date_cols=()):
 
 
 def main():
+    print("=" * 64)
+    print("  DKSH  -  Stock Ageing Report Generator")
+    print("=" * 64)
+    print(f"  Input folder : {INPUT_DIR}")
+    print(f"  Output folder: {OUTPUT_DIR}")
+    print(f"  Run date     : {pd.Timestamp.today():%Y-%m-%d}")
+    print("-" * 64)
+
     os.makedirs(OUTPUT_DIR, exist_ok=True)
-    print("Building DATA ...")
-    data, data_out = build_data()
+    data, data_out = build_data()                     # steps 1-5
 
-    n_nogr = int(data["Bucket"].isna().sum())
-    n_unassigned = int((data["Product Group"] == "UNASSIGNED GROUP").sum())
-    print(f"  rows: {len(data):,} | No-GR rows: {n_nogr} | Unassigned-Group rows: {n_unassigned}")
-    print(f"  grand qty: {data['Unrestricted'].sum():,.3f} | grand value: {data['Value Unrestricted'].sum():,.2f}")
-
+    print("[6/7] Building dashboard, charts & data sheets ...")
     wb = Workbook()
-    # remove default sheet; exec dashboard inserted at index 0
-    default_ws = wb.active
+    default_ws = wb.active                              # remove default sheet
     build_executive_dashboard(wb, data)
     wb.remove(default_ws)
-
     build_tables_dashboard(wb.create_sheet("PV DATA (Dashboard)"), data)
     write_table(wb.create_sheet("DATA"), data_out, date_cols=["GR Date"])
     dead = data_out[data_out["Bucket"] == ">365"].copy()
     write_table(wb.create_sheet("Ageing > 365 D"), dead, date_cols=["GR Date"])
-
     mb40, mb44, r40, r44, pg = load_inputs()
     for name, df in [("MB52_TH40", mb40), ("MB52_TH44", mb44),
                      ("R138_TH40", r40), ("R138_TH44", r44), ("Product Group", pg)]:
         write_table(wb.create_sheet(name), df,
                     date_cols=[c for c in ("Last GR", "Expiry date") if c in df.columns])
+    print(f"       -> {len(wb.sheetnames)} sheets created")
 
+    print("[7/7] Writing the Excel file ...")
     out_path = os.path.join(OUTPUT_DIR, OUTPUT_NAME)
-    wb.save(out_path)
-    print(f"Saved -> {out_path}")
+    try:
+        wb.save(out_path)
+    except PermissionError:
+        print(f"  ERROR: cannot save '{OUTPUT_NAME}'.")
+        print("  The file is probably already OPEN in Excel - please close it and run again.")
+        raise SystemExit(1)
+    print(f"       [ OK ] saved: {out_path}")
+
+    print("=" * 64)
+    print("  DONE  -  report generated successfully")
+    print("=" * 64)
     return out_path
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except SystemExit:
+        raise                                          # already a friendly message
+    except KeyboardInterrupt:
+        print("\n  Cancelled by user.")
+        raise SystemExit(1)
+    except Exception as e:
+        import traceback
+        print()
+        print("=" * 64)
+        print("  UNEXPECTED ERROR  -  the report was NOT generated")
+        print("=" * 64)
+        print(f"  {type(e).__name__}: {e}")
+        print("-" * 64)
+        print("  Technical details (share this if you need help):")
+        traceback.print_exc()
+        raise SystemExit(1)
