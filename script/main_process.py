@@ -12,20 +12,21 @@ multi-sheet Excel report:
   * "Ageing > 365 D"      - dead-stock rows
   * copies of the 5 input sheets
 
-Two root-cause fixes vs. the original code
-------------------------------------------
-1) "No GR Date" rows  : GR/Shipper/Profit lookup keyed on
-   Material+Quantity+Batch, but MB52 'Unrestricted' often differs from
-   R138 'Quantity'.  Fixed with a tiered lookup
-   (full key -> Material+Batch -> Material -> supplement).
-2) "Unassigned Group" : 554 materials are absent from the Product Group file
-   and were classified in the reference from external master data.  Fixed
-   with a tiered lookup
-   (PG file -> supplement -> Material-Group map -> R138 Level 4).
+Key logic (matches the manual report)
+--------------------------------------
+* Ageing      : measured as (today - Last GR), bucketed 0-30 / 31-90 / 91-180 /
+                181-365 / >365.
+* GR / Shipper / Profit center : tiered lookup against R138 so a row is matched
+                even when MB52 'Unrestricted' differs from R138 'Quantity'
+                (full key Material+Quantity+Batch -> Material+Batch -> Material).
+* Product Group: Product Group file (by Material) first, then the RAW R138
+                'Level 4 Product Group' (by Material) as the only fallback.
+                Values are kept exactly as-is (e.g. 'SERVICE' from the Product
+                Group file and 'SERVICES' from R138 remain distinct), which is
+                how the manual report classifies them.
 
-Product_Group_Supplement.xlsx carries the values that exist in the reference
-but not in the SAP exports.  Maintain it as master data (or add the rows to
-your SAP Product Group export).
+Everything is derived from the 5 daily input files only - no external/static
+supplement, so the report is fully reproducible each day.
 """
 
 import os
@@ -48,8 +49,6 @@ warnings.filterwarnings("ignore")
 # ----------------------------------------------------------------------------
 INPUT_DIR       = os.environ.get("INPUT_DIR",  "/Users/phachon/Documents/DKSH/auto-stock-report/input")
 OUTPUT_DIR      = os.environ.get("OUTPUT_DIR", "/Users/phachon/Documents/DKSH/auto-stock-report/output")
-SUPPLEMENT_PATH = os.environ.get("SUPPLEMENT_PATH",
-                                 os.path.join(INPUT_DIR, "Product_Group_Supplement.xlsx"))
 OUTPUT_NAME     = "Result_Report.xlsx"
 
 FILES = {
@@ -62,7 +61,9 @@ FILES = {
 
 BUCKET_BINS   = [-np.inf, 30, 90, 180, 365, np.inf]
 BUCKET_LABELS = ["0-30", "31-90", "91-180", "181-365", ">365"]
-PG_ORDER      = ["ACCESSORIES", "CONSUMABLES", "EQUIPMENT", "SERVICE", "SPARE PARTS"]
+# Display order. SERVICE comes from the Product Group file; SERVICES from R138
+# 'Level 4 Product Group' (kept separate, exactly as the manual report shows them).
+PG_ORDER      = ["ACCESSORIES", "CONSUMABLES", "EQUIPMENT", "SERVICE", "SERVICES", "SPARE PARTS"]
 
 # ----------------------------------------------------------------------------
 # Helpers
@@ -73,8 +74,10 @@ def clean_key(s: pd.Series) -> pd.Series:
     return s.replace("NAN", "")
 
 
-def norm_pg(s: pd.Series) -> pd.Series:
-    return s.astype(str).str.strip().str.upper().replace("SERVICES", "SERVICE")
+def upper_strip(s: pd.Series) -> pd.Series:
+    """Upper-case + strip a text column. Note: 'SERVICES' is NOT merged into
+    'SERVICE' — the manual report keeps them as distinct categories."""
+    return s.astype(str).str.strip().str.upper()
 
 
 def load_inputs():
@@ -87,25 +90,10 @@ def load_inputs():
     return mb40, mb44, r40, r44, pg
 
 
-def load_supplement():
-    if not os.path.exists(SUPPLEMENT_PATH):
-        print(f"  [warn] supplement not found at {SUPPLEMENT_PATH} -- using derived rules only.")
-        return (pd.DataFrame(columns=["Material", "Product Group"]),
-                pd.DataFrame(columns=["Material", "GR Date"]))
-    xls = pd.ExcelFile(SUPPLEMENT_PATH)
-    pg_supp = (pd.read_excel(SUPPLEMENT_PATH, sheet_name="Product Group")
-               if "Product Group" in xls.sheet_names
-               else pd.DataFrame(columns=["Material", "Product Group"]))
-    gr_supp = (pd.read_excel(SUPPLEMENT_PATH, sheet_name="GR Date")
-               if "GR Date" in xls.sheet_names
-               else pd.DataFrame(columns=["Material", "GR Date"]))
-    return pg_supp, gr_supp
-
-
 # ----------------------------------------------------------------------------
 # GR / Shipper / Profit-center attachment  (tiered keys, per plant)
 # ----------------------------------------------------------------------------
-def attach_r138(mb, r, gr_supp):
+def attach_r138(mb, r):
     mb = mb.copy()
     r  = r.copy()
     r["Last GR"] = pd.to_datetime(r["Last GR"], errors="coerce")
@@ -125,6 +113,7 @@ def attach_r138(mb, r, gr_supp):
         val  = val.fillna(mb["k_mb"].map(mbk))
         mb[new_col] = val
 
+    # GR Date: full key -> Material+Batch -> Material (most common non-null)
     full = r.drop_duplicates("k_full").set_index("k_full")["Last GR"]
     mbk  = r.drop_duplicates("k_mb").set_index("k_mb")["Last GR"]
     gr   = mb["k_full"].map(full)
@@ -133,51 +122,37 @@ def attach_r138(mb, r, gr_supp):
                 .groupby("k_mat")["Last GR"]
                 .agg(lambda x: x.value_counts().index[0]))
     gr = gr.fillna(mb["k_mat"].map(mat_gr))
-    if len(gr_supp):
-        sg = gr_supp.copy()
-        sg["k"] = clean_key(sg["Material"])
-        sg["d"] = pd.to_datetime(sg["GR Date"], errors="coerce")
-        gr = gr.fillna(mb["k_mat"].map(sg.set_index("k")["d"]))
     mb["GR Date"] = gr
     return mb
 
 
 # ----------------------------------------------------------------------------
-# Product Group attachment  (tiered: PG file -> supplement -> MatGroup -> L4)
+# Product Group attachment
+# Matches the manual report exactly: Product Group file (by Material) first,
+# then RAW R138 'Level 4 Product Group' (by Material) as the only fallback.
+# No normalisation (SERVICES stays separate), no supplement, no Material-Group step.
 # ----------------------------------------------------------------------------
-def attach_product_group(data, pg, pg_supp, r_all):
+def attach_product_group(data, pg, r_all):
     data = data.copy()
     data["mk"] = clean_key(data["Material"])
-    data["mg"] = clean_key(data["Material Group"])
 
     pg_map = (pg.assign(mk=clean_key(pg["Material"]))
-                .drop_duplicates("mk").set_index("mk")["Product Group"])
+                .drop_duplicates("mk").set_index("mk")["Product Group"].pipe(upper_strip))
     pgv = data["mk"].map(pg_map)
-
-    if len(pg_supp):
-        supp_map = (pg_supp.assign(mk=clean_key(pg_supp["Material"]))
-                          .drop_duplicates("mk").set_index("mk")["Product Group"])
-        pgv = pgv.fillna(data["mk"].map(supp_map))
-
-    mg_map = (pg.assign(mg=clean_key(pg["Material Group"]),
-                        p=pg["Product Group"].astype(str).str.strip())
-                .groupby("mg")["p"].agg(lambda x: x.value_counts().index[0]))
-    pgv = pgv.fillna(data["mg"].map(mg_map))
 
     r_all = r_all.copy()
     r_all["mk"] = clean_key(r_all["Material No."])
-    r_all["l4"] = norm_pg(r_all["Level 4 Product Group"])
+    r_all["l4"] = upper_strip(r_all["Level 4 Product Group"])
     l4_map = (r_all.dropna(subset=["Level 4 Product Group"])
                    .drop_duplicates("mk").set_index("mk")["l4"])
     pgv = pgv.fillna(data["mk"].map(l4_map))
 
-    data["Product Group"] = norm_pg(pgv.fillna("Unassigned Group"))
+    data["Product Group"] = pgv.fillna("Unassigned Group")
     return data
 
 
 def build_data():
     mb40, mb44, r40, r44, pg = load_inputs()
-    pg_supp, gr_supp = load_supplement()
 
     for df in (mb40, mb44):
         df["Unrestricted"]       = pd.to_numeric(df["Unrestricted"], errors="coerce")
@@ -186,12 +161,12 @@ def build_data():
     mb40 = mb40[mb40["Unrestricted"] != 0].copy()
     mb44 = mb44[mb44["Unrestricted"] != 0].copy()
 
-    m40 = attach_r138(mb40, r40, gr_supp)
-    m44 = attach_r138(mb44, r44, gr_supp)
+    m40 = attach_r138(mb40, r40)
+    m44 = attach_r138(mb44, r44)
     data = pd.concat([m40, m44], ignore_index=True)
 
     r_all = pd.concat([r40, r44], ignore_index=True)
-    data = attach_product_group(data, pg, pg_supp, r_all)
+    data = attach_product_group(data, pg, r_all)
     data["Shipper"] = data["Shipper"].fillna("Unassigned Shipper")
 
     today = pd.Timestamp.today().normalize()
