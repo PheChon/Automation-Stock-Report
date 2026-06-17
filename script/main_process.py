@@ -606,7 +606,6 @@ def build_executive_dashboard(wb, data):
     h1.legend = None
     show_axes(h1)
     h1.x_axis.numFmt = MFMT; h1.x_axis.majorGridlines = None
-    h1.x_axis.scaling.min = 0; h1.x_axis.scaling.max = nice_max(top_clients.max() / 1e6)
     value_labels(h1)
     _series_color(h1.series[0], "2E5496")
     ws.add_chart(h1, "B52")
@@ -620,7 +619,6 @@ def build_executive_dashboard(wb, data):
     h2.legend = None
     show_axes(h2)
     h2.x_axis.numFmt = MFMT; h2.x_axis.majorGridlines = None
-    h2.x_axis.scaling.min = 0; h2.x_axis.scaling.max = nice_max(dead_clients.max() / 1e6)
     value_labels(h2)
     _series_color(h2.series[0], "C00000")
     ws.add_chart(h2, "I29")
